@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "TOS Auto Spinner",
+  "version": "1.0.0",
+  "description": "Automate rune spinning in Tower of Saviors simulator",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://louisalflame.github.io/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://louisalflame.github.io/TOSwebsite/canvas.html"],
+      "js": ["algorithm.js", "content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

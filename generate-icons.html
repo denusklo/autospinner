@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>TOS Auto Spinner - Icon Generator</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      text-align: center;
+      background: #f0f0f0;
+    }
+    h1 {
+      color: #333;
+    }
+    .canvas-container {
+      margin: 20px 0;
+    }
+    canvas {
+      border: 2px solid #333;
+      margin: 10px;
+      background: white;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 15px 30px;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 10px;
+    }
+    button:hover {
+      background: #45a049;
+    }
+    .info {
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      margin: 20px auto;
+      max-width: 600px;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  <h1>TOS Auto Spinner Icon Generator</h1>
+
+  <div class="info">
+    <h3>Instructions:</h3>
+    <ol>
+      <li>Click "Generate Icons" below</li>
+      <li>Right-click each icon and select "Save image as..."</li>
+      <li>Save them with the exact names: icon16.png, icon48.png, icon128.png</li>
+      <li>Place them in the autospinner folder</li>
+      <li>Reload your extension in Chrome</li>
+    </ol>
+  </div>
+
+  <button onclick="generateIcons()">Generate Icons</button>
+
+  <div class="canvas-container" id="canvasContainer"></div>
+
+  <script>
+    function generateIcons() {
+      const sizes = [16, 48, 128];
+      const container = document.getElementById('canvasContainer');
+      container.innerHTML = '';
+
+      sizes.forEach(size => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+
+        // Draw background gradient
+        const gradient = ctx.createLinearGradient(0, 0, size, size);
+        gradient.addColorStop(0, '#4CAF50');
+        gradient.addColorStop(1, '#2196F3');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, size, size);
+
+        // Draw border
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = size / 16;
+        ctx.strokeRect(size / 16, size / 16, size - size / 8, size - size / 8);
+
+        // Draw "TOS" text or circular pattern for smaller icons
+        ctx.fillStyle = '#fff';
+        ctx.font = `bold ${size / 3}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        if (size >= 48) {
+          ctx.fillText('TOS', size / 2, size / 2);
+        } else {
+          // For small icon, draw a simple circle
+          ctx.beginPath();
+          ctx.arc(size / 2, size / 2, size / 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Add label and download button
+        const wrapper = document.createElement('div');
+        wrapper.style.display = 'inline-block';
+        wrapper.style.margin = '10px';
+
+        const label = document.createElement('div');
+        label.textContent = `icon${size}.png`;
+        label.style.marginBottom = '5px';
+        label.style.fontWeight = 'bold';
+
+        const downloadBtn = document.createElement('button');
+        downloadBtn.textContent = `Download ${size}x${size}`;
+        downloadBtn.onclick = () => downloadCanvas(canvas, `icon${size}.png`);
+
+        wrapper.appendChild(label);
+        wrapper.appendChild(canvas);
+        wrapper.appendChild(document.createElement('br'));
+        wrapper.appendChild(downloadBtn);
+
+        container.appendChild(wrapper);
+      });
+    }
+
+    function downloadCanvas(canvas, filename) {
+      const link = document.createElement('a');
+      link.download = filename;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>TOS Algorithm Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+
+    h1 {
+      color: #333;
+    }
+
+    .board {
+      display: inline-grid;
+      grid-template-columns: repeat(6, 60px);
+      gap: 5px;
+      background: #333;
+      padding: 10px;
+      border-radius: 8px;
+      margin: 20px 0;
+    }
+
+    .cell {
+      width: 60px;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 40px;
+      background: #fff;
+      border-radius: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .cell:hover {
+      background: #f0f0f0;
+    }
+
+    .controls {
+      margin: 20px 0;
+    }
+
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 5px;
+    }
+
+    button:hover {
+      background: #45a049;
+    }
+
+    .result {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      margin: 20px 0;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .path {
+      display: inline-block;
+      background: #e3f2fd;
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+
+    .info {
+      background: #fff3cd;
+      padding: 15px;
+      border-radius: 4px;
+      margin: 10px 0;
+      border-left: 4px solid #ffc107;
+    }
+  </style>
+</head>
+<body>
+  <h1>TOS Rune Algorithm Test</h1>
+
+  <div class="info">
+    <strong>Click cells to change rune types:</strong><br>
+    💧 Water → 🔥 Fire → 🌿 Wood → 💡 Light → 🌙 Dark → ❤️ Heart → 💧 Water
+  </div>
+
+  <h2>Current Board:</h2>
+  <div id="board" class="board"></div>
+
+  <div class="controls">
+    <button onclick="randomizeBoard()">Random Board</button>
+    <button onclick="solvePath()">Find Best Path</button>
+    <button onclick="simulatePath()">Simulate Path</button>
+  </div>
+
+  <div id="result" class="result" style="display: none;"></div>
+
+  <script src="algorithm.js"></script>
+  <script>
+    const RUNES = ['💧', '🔥', '🌿', '💡', '🌙', '❤️'];
+    const RUNE_NAMES = ['Water', 'Fire', 'Wood', 'Light', 'Dark', 'Heart'];
+
+    let boardState = [];
+    let currentSolution = null;
+
+    // Initialize board
+    function initBoard() {
+      boardState = [];
+      for (let y = 0; y < 5; y++) {
+        const row = [];
+        for (let x = 0; x < 6; x++) {
+          row.push(Math.floor(Math.random() * 6));
+        }
+        boardState.push(row);
+      }
+      renderBoard();
+    }
+
+    function renderBoard() {
+      const boardEl = document.getElementById('board');
+      boardEl.innerHTML = '';
+
+      for (let y = 0; y < 5; y++) {
+        for (let x = 0; x < 6; x++) {
+          const cell = document.createElement('div');
+          cell.className = 'cell';
+          cell.textContent = RUNES[boardState[y][x]];
+          cell.onclick = () => toggleRune(x, y);
+          cell.setAttribute('data-x', x);
+          cell.setAttribute('data-y', y);
+          boardEl.appendChild(cell);
+        }
+      }
+    }
+
+    function toggleRune(x, y) {
+      boardState[y][x] = (boardState[y][x] + 1) % 6;
+      renderBoard();
+    }
+
+    function randomizeBoard() {
+      initBoard();
+      document.getElementById('result').style.display = 'none';
+    }
+
+    function solvePath() {
+      const solver = new RuneSolver(boardState);
+      const solution = solver.solve();
+      currentSolution = solution;
+
+      const resultEl = document.getElementById('result');
+      resultEl.style.display = 'block';
+
+      const matcher = new MatchFinder(solution.board);
+      const scoreData = matcher.calculateScore();
+
+      resultEl.innerHTML = `
+        <h3>Solution Found!</h3>
+        <p><strong>Score:</strong> ${solution.score}</p>
+        <p><strong>Combos:</strong> ${scoreData.comboCount}</p>
+        <p><strong>Start Position:</strong> (${solution.startX}, ${solution.startY})</p>
+        <p><strong>Path Length:</strong> ${solution.path.length} moves</p>
+        <div class="path">
+          <strong>Path:</strong><br>
+          ${solution.path.map((p, i) => `Step ${i}: (${p.x}, ${p.y})`).join(' → ')}
+        </div>
+        <h4>Matches Found:</h4>
+        ${scoreData.matches.map(m => `
+          <div style="margin: 5px 0;">
+            ${RUNES[m.type]} ${RUNE_NAMES[m.type]}: ${m.positions.length} runes (${m.direction})
+          </div>
+        `).join('')}
+      `;
+
+      console.log('Solution:', solution);
+      console.log('Final board:');
+      solution.board.print();
+    }
+
+    function simulatePath() {
+      if (!currentSolution) {
+        alert('Please solve a path first!');
+        return;
+      }
+
+      const cells = document.querySelectorAll('.cell');
+      const path = currentSolution.path;
+      let step = 0;
+
+      // Clear previous highlights
+      cells.forEach(c => c.style.background = '#fff');
+
+      const interval = setInterval(() => {
+        if (step >= path.length) {
+          clearInterval(interval);
+          return;
+        }
+
+        // Highlight current position
+        cells.forEach(c => {
+          const x = parseInt(c.getAttribute('data-x'));
+          const y = parseInt(c.getAttribute('data-y'));
+
+          if (x === path[step].x && y === path[step].y) {
+            c.style.background = '#4CAF50';
+            setTimeout(() => {
+              c.style.background = '#fff';
+            }, 300);
+          }
+        });
+
+        step++;
+      }, 200);
+    }
+
+    // Initialize on load
+    initBoard();
+  </script>
+</body>
+</html>

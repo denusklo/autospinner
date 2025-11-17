@@ -71,6 +71,23 @@ class Board {
       console.log(row);
     }
   }
+
+  /**
+   * Count runes by type on the board
+   * @returns {Object} Count for each rune type {0: count, 1: count, ...}
+   */
+  countRunes() {
+    const counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0};
+    for (let y = 0; y < this.height; y++) {
+      for (let x = 0; x < this.width; x++) {
+        const type = this.grid[y][x];
+        if (type >= 0 && type < 6) {
+          counts[type]++;
+        }
+      }
+    }
+    return counts;
+  }
 }
 
 /**
@@ -395,6 +412,196 @@ class ComboMaximizer {
       }
     }
     return positions;
+  }
+}
+
+/**
+ * Generates target boards based on specific combo constraints
+ * Validates if requested combos are achievable before generation
+ */
+class ConstrainedComboGenerator {
+  constructor(board) {
+    this.board = board;
+    this.runeCounts = board.countRunes();
+    this.symbols = ['💧', '🔥', '🌿', '💡', '🌙', '❤️'];
+    this.runeNames = ['Water', 'Fire', 'Wood', 'Light', 'Dark', 'Heart'];
+  }
+
+  /**
+   * Validate if constraints can be achieved with available runes
+   * @param {Object} constraints - Combo requirements
+   *   Format: {
+   *     0: {combos: 2, size: 3},  // 2 water combos of 3 runes each
+   *     1: {combos: 1, size: 4}   // 1 fire combo of 4 runes
+   *   }
+   * @returns {Object} {success: boolean, errors: Array<string>}
+   */
+  validateConstraints(constraints) {
+    const errors = [];
+    const runeUsage = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0};
+
+    // Calculate total runes needed for each type
+    for (const [typeStr, requirement] of Object.entries(constraints)) {
+      const type = parseInt(typeStr);
+
+      if (type < 0 || type > 5) {
+        errors.push(`Invalid rune type: ${type}`);
+        continue;
+      }
+
+      if (!requirement.combos || !requirement.size) {
+        errors.push(`Invalid constraint format for ${this.runeNames[type]}`);
+        continue;
+      }
+
+      if (requirement.size < 3) {
+        errors.push(`Combo size must be at least 3 (got ${requirement.size} for ${this.runeNames[type]})`);
+        continue;
+      }
+
+      const needed = requirement.combos * requirement.size;
+      runeUsage[type] += needed;
+
+      const available = this.runeCounts[type];
+      if (available < needed) {
+        errors.push(
+          `Not enough ${this.runeNames[type]} ${this.symbols[type]} runes. ` +
+          `Need ${needed} (${requirement.combos} combos × ${requirement.size}), ` +
+          `but only ${available} available on board.`
+        );
+      }
+    }
+
+    return {
+      success: errors.length === 0,
+      errors: errors,
+      runeUsage: runeUsage
+    };
+  }
+
+  /**
+   * Generate target board with specified constraints
+   * @param {Object} constraints - Combo requirements
+   * @returns {Object} {success: boolean, targetBoard: Board|null, errors: Array<string>}
+   */
+  generateTargetBoard(constraints) {
+    // Validate constraints first
+    const validation = this.validateConstraints(constraints);
+    if (!validation.success) {
+      return {
+        success: false,
+        targetBoard: null,
+        errors: validation.errors
+      };
+    }
+
+    const targetBoard = new Board(this.board.width, this.board.height);
+    targetBoard.grid = Array(this.board.height).fill(0).map(() => Array(this.board.width).fill(-1));
+
+    // Sort constraints by combo size (larger first) to prioritize longer combos
+    const sortedConstraints = Object.entries(constraints)
+      .map(([type, req]) => ({type: parseInt(type), ...req}))
+      .sort((a, b) => b.size - a.size);
+
+    // Helper function to find empty horizontal space
+    const findEmptyRow = (length) => {
+      for (let y = 0; y < targetBoard.height; y++) {
+        for (let x = 0; x <= targetBoard.width - length; x++) {
+          let allEmpty = true;
+          for (let i = 0; i < length; i++) {
+            if (targetBoard.get(x + i, y) !== -1) {
+              allEmpty = false;
+              break;
+            }
+          }
+          if (allEmpty) {
+            return {x, y};
+          }
+        }
+      }
+      return null;
+    };
+
+    // Place requested combos
+    for (const constraint of sortedConstraints) {
+      const {type, combos, size} = constraint;
+
+      for (let i = 0; i < combos; i++) {
+        const pos = findEmptyRow(size);
+        if (!pos) {
+          return {
+            success: false,
+            targetBoard: null,
+            errors: [`Could not fit all ${this.runeNames[type]} combos on board (board space exhausted)`]
+          };
+        }
+
+        // Place the combo horizontally
+        for (let j = 0; j < size; j++) {
+          targetBoard.set(pos.x + j, pos.y, type);
+        }
+      }
+    }
+
+    // Fill remaining empty cells with leftover runes
+    const remainingRunes = {...this.runeCounts};
+
+    // Subtract used runes
+    for (const [type, usage] of Object.entries(validation.runeUsage)) {
+      remainingRunes[type] -= usage;
+    }
+
+    // Get all empty positions
+    const emptyPositions = [];
+    for (let y = 0; y < targetBoard.height; y++) {
+      for (let x = 0; x < targetBoard.width; x++) {
+        if (targetBoard.get(x, y) === -1) {
+          emptyPositions.push({x, y});
+        }
+      }
+    }
+
+    // Fill empty positions with remaining runes
+    let posIndex = 0;
+    for (let type = 0; type < 6; type++) {
+      let count = remainingRunes[type];
+      while (count > 0 && posIndex < emptyPositions.length) {
+        const pos = emptyPositions[posIndex];
+        targetBoard.set(pos.x, pos.y, type);
+        count--;
+        posIndex++;
+      }
+    }
+
+    return {
+      success: true,
+      targetBoard: targetBoard,
+      errors: []
+    };
+  }
+
+  /**
+   * Print constraint validation results
+   * @param {Object} validation - Result from validateConstraints()
+   */
+  printValidation(validation) {
+    if (validation.success) {
+      console.log('✅ All constraints can be achieved!');
+      console.log('\nRune usage:');
+      for (let type = 0; type < 6; type++) {
+        const used = validation.runeUsage[type];
+        if (used > 0) {
+          const available = this.runeCounts[type];
+          console.log(
+            `  ${this.symbols[type]} ${this.runeNames[type]}: ` +
+            `${used}/${available} (${available - used} remaining)`
+          );
+        }
+      }
+    } else {
+      console.log('❌ Constraints cannot be achieved:');
+      validation.errors.forEach(err => console.log(`  - ${err}`));
+    }
   }
 }
 

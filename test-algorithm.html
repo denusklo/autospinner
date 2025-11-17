@@ -101,9 +101,11 @@
     <button onclick="randomizeBoard()">Random Board</button>
     <button onclick="solvePath()">Find Best Path</button>
     <button onclick="simulatePath()">Simulate Path</button>
+    <button onclick="testConstrainedCombo()">Test Constrained Combos</button>
   </div>
 
   <div id="result" class="result" style="display: none;"></div>
+  <div id="constraint-result" class="result" style="display: none;"></div>
 
   <script src="algorithm.js"></script>
   <script>
@@ -221,6 +223,90 @@
 
         step++;
       }, 200);
+    }
+
+    function testConstrainedCombo() {
+      // Create board from current state
+      const board = new Board();
+      board.fromArray(boardState);
+
+      // Count runes
+      const counts = board.countRunes();
+
+      // Create constraints - example: 2 fire combos (3 each), 1 water combo (4)
+      const constraints = {
+        1: {combos: 2, size: 3},  // 2 fire combos of 3 runes = 6 fire runes needed
+        0: {combos: 1, size: 4}   // 1 water combo of 4 runes = 4 water runes needed
+      };
+
+      // Generate constrained target
+      const generator = new ConstrainedComboGenerator(board);
+      const result = generator.generateTargetBoard(constraints);
+
+      const resultEl = document.getElementById('constraint-result');
+      resultEl.style.display = 'block';
+
+      if (result.success) {
+        const matcher = new MatchFinder(result.targetBoard);
+        const scoreData = matcher.calculateScore();
+
+        resultEl.innerHTML = `
+          <h3>✅ Constrained Combo Generation Successful!</h3>
+          <h4>Current Board Rune Counts:</h4>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
+            ${Object.entries(counts).map(([type, count]) => `
+              <div>${RUNES[type]} ${RUNE_NAMES[type]}: ${count}</div>
+            `).join('')}
+          </div>
+          <h4>Requested Constraints:</h4>
+          <ul>
+            <li>🔥 Fire: 2 combos of 3 runes (6 total needed)</li>
+            <li>💧 Water: 1 combo of 4 runes (4 total needed)</li>
+          </ul>
+          <h4>Generated Target Board:</h4>
+          <div style="font-family: monospace; line-height: 1.5; font-size: 24px;">
+            ${Array.from({length: 5}, (_, y) =>
+              Array.from({length: 6}, (_, x) => RUNES[result.targetBoard.get(x, y)]).join('')
+            ).join('<br>')}
+          </div>
+          <h4>Target Board Score:</h4>
+          <p><strong>Score:</strong> ${scoreData.score}</p>
+          <p><strong>Combos:</strong> ${scoreData.comboCount}</p>
+          <h4>Matches in Target Board:</h4>
+          ${scoreData.matches.map(m => `
+            <div style="margin: 5px 0;">
+              ${RUNES[m.type]} ${RUNE_NAMES[m.type]}: ${m.positions.length} runes (${m.direction})
+            </div>
+          `).join('')}
+        `;
+
+        console.log('Constrained generation successful!');
+        console.log('Target board:');
+        result.targetBoard.print();
+      } else {
+        resultEl.innerHTML = `
+          <h3>❌ Constrained Combo Generation Failed</h3>
+          <h4>Current Board Rune Counts:</h4>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
+            ${Object.entries(counts).map(([type, count]) => `
+              <div>${RUNES[type]} ${RUNE_NAMES[type]}: ${count}</div>
+            `).join('')}
+          </div>
+          <h4>Requested Constraints:</h4>
+          <ul>
+            <li>🔥 Fire: 2 combos of 3 runes (6 total needed)</li>
+            <li>💧 Water: 1 combo of 4 runes (4 total needed)</li>
+          </ul>
+          <h4>Errors:</h4>
+          <ul style="color: red;">
+            ${result.errors.map(err => `<li>${err}</li>`).join('')}
+          </ul>
+          <p><strong>Solution:</strong> You need more runes of the required types on the board. Try randomizing the board until you have enough runes.</p>
+        `;
+
+        console.log('Constrained generation failed:');
+        console.log(result.errors);
+      }
     }
 
     // Initialize on load

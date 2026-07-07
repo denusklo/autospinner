@@ -1,6 +1,19 @@
 // TOS Auto Spinner - Rune Movement Algorithm
 
 /**
+ * Per-cell constraint flags for real-game board effects (PROJECT-FACTS P9).
+ * Passed as a 5x6 bitmask grid `flags[y][x]`; flags are POSITIONAL — they
+ * stay with the cell, not the rune (matches the sealed-column observation;
+ * a future per-rune travelling effect needs a different mechanism).
+ * Combine freely: e.g. a frozen rune = NO_PICKUP | NO_SWAP.
+ */
+const CELL_FLAGS = {
+  NO_DISSOLVE: 1, // cell never joins a match group (sealed column/tile)
+  NO_PICKUP: 2,   // rune cannot be grabbed as the held rune
+  NO_SWAP: 4,     // cell cannot be entered/displaced by a drag path
+};
+
+/**
  * Represents the game board state
  */
 class Board {
@@ -863,10 +876,18 @@ class RuneSolver {
 class BoardSimulator {
   /**
    * Find combo groups on a static board.
+   * @param {number[]} sealedColumns columns whose runes can be dragged but
+   *   never dissolve (real-game special mode, PROJECT-FACTS P6/P9); sealed
+   *   cells break runs and never join groups.
+   * @param {number[][]|null} flags per-cell CELL_FLAGS bitmask grid; cells
+   *   with NO_DISSOLVE behave like sealed cells. Composes with sealedColumns.
    * @returns {Array<{type: number, cells: Array<[number, number]>}>}
    */
-  static findComboGroups(board) {
+  static findComboGroups(board, sealedColumns = [], flags = null) {
     const w = board.width, h = board.height;
+    const sealed = new Set(sealedColumns);
+    const blocked = (x, y) => sealed.has(x) ||
+      (flags !== null && (flags[y][x] & CELL_FLAGS.NO_DISSOLVE) !== 0);
     const marked = Array.from({length: h}, () => Array(w).fill(false));
 
     // Row scan: mark maximal runs of 3+ (advance past each run — no double count)
@@ -874,9 +895,9 @@ class BoardSimulator {
       let x = 0;
       while (x < w) {
         const type = board.get(x, y);
-        if (type === -1) { x++; continue; }
+        if (type === -1 || blocked(x, y)) { x++; continue; }
         let end = x + 1;
-        while (end < w && board.get(end, y) === type) end++;
+        while (end < w && !blocked(end, y) && board.get(end, y) === type) end++;
         if (end - x >= 3) {
           for (let i = x; i < end; i++) marked[y][i] = true;
         }
@@ -886,12 +907,13 @@ class BoardSimulator {
 
     // Column scan
     for (let x = 0; x < w; x++) {
+      if (sealed.has(x)) continue;
       let y = 0;
       while (y < h) {
         const type = board.get(x, y);
-        if (type === -1) { y++; continue; }
+        if (type === -1 || blocked(x, y)) { y++; continue; }
         let end = y + 1;
-        while (end < h && board.get(x, end) === type) end++;
+        while (end < h && !blocked(x, end) && board.get(x, end) === type) end++;
         if (end - y >= 3) {
           for (let i = y; i < end; i++) marked[i][x] = true;
         }
@@ -932,13 +954,15 @@ class BoardSimulator {
    * Mutates a clone; the input board is untouched.
    * @returns {{totalCombos, firstCombos, chains, groups, boardAfter}}
    */
-  static resolve(board) {
+  static resolve(board, options = {}) {
+    const sealedColumns = options.sealedColumns ?? [];
+    const flags = options.flags ?? null;
     const work = board.clone();
     let totalCombos = 0, firstCombos = 0, chains = 0;
     const allGroups = [];
 
     while (true) {
-      const groups = BoardSimulator.findComboGroups(work);
+      const groups = BoardSimulator.findComboGroups(work, sealedColumns, flags);
       if (groups.length === 0) break;
       chains++;
       if (chains === 1) firstCombos = groups.length;
@@ -987,6 +1011,15 @@ class DoraSolver {
     this.maxPath = options.maxPath ?? 30;
     this.moveMode = options.moveMode ?? 4;
     this.verbose = options.verbose ?? false;
+    // Columns that cannot dissolve (draggable-through only); the beam search
+    // then implicitly parks scarce runes there and pulls useful ones out.
+    this.sealedColumns = options.sealedColumns ?? [];
+    // Per-cell CELL_FLAGS bitmask grid (positional; composes with sealedColumns)
+    this.flags = options.flags ?? null;
+    // Target for FIRST-wave combos (before cascades). When > 0 the beam is
+    // steered toward it and the best solution reaching it is returned, even
+    // if a higher-weight solution with fewer first-wave combos exists.
+    this.minFirstCombos = options.minFirstCombos ?? 0;
     // TUNABLE (spec §9: exact values unpublished). colorWeights indexed by
     // PROJECT encoding: [Water, Fire, Wood, Light, Dark, Heart].
     this.tunable = Object.assign({
@@ -994,6 +1027,9 @@ class DoraSolver {
       comboBonus: 4,      // spec-published
       bigGroupBonus: 1,   // per orb beyond 3 in a combo group
       chainBonus: 2,      // per cascade wave beyond the first
+      firstComboSteer: 8, // beam-steering bonus per first-wave combo up to minFirstCombos
+      pairSteer: 0.5,     // partial-progress bonus per adjacent same-color pair
+                          // (only while below the minFirstCombos target)
     }, options.tunable || {});
   }
 
@@ -1016,10 +1052,32 @@ class DoraSolver {
   }
 
   /**
+   * Partial progress toward first-wave groups: adjacent same-color pairs in
+   * the dissolvable area. Lets the beam see "almost-groups" as progress so
+   * setup-heavy paths survive pruning (only used below the first-combo target).
+   */
+  pairPotential(board) {
+    const sealed = new Set(this.sealedColumns);
+    const nd = (x, y) => sealed.has(x) ||
+      (this.flags !== null && (this.flags[y][x] & CELL_FLAGS.NO_DISSOLVE) !== 0);
+    let pairs = 0;
+    for (let y = 0; y < board.height; y++) {
+      for (let x = 0; x < board.width; x++) {
+        if (nd(x, y)) continue;
+        const t = board.get(x, y);
+        if (t === -1) continue;
+        if (x + 1 < board.width && !nd(x + 1, y) && board.get(x + 1, y) === t) pairs++;
+        if (y + 1 < board.height && !nd(x, y + 1) && board.get(x, y + 1) === t) pairs++;
+      }
+    }
+    return pairs;
+  }
+
+  /**
    * Spec §2 Step 5 (calculateWeight), on the fully-resolved cascade result.
    */
   calculateWeight(board) {
-    const sim = BoardSimulator.resolve(board);
+    const sim = BoardSimulator.resolve(board, {sealedColumns: this.sealedColumns, flags: this.flags});
     const t = this.tunable;
     let weight = 0;
     for (const g of sim.groups) {
@@ -1038,9 +1096,11 @@ class DoraSolver {
    *   {startX, startY, path, moves, score, comboCount, firstCombos, chains, board}
    */
   solve() {
+    const f = (x, y) => this.flags === null ? 0 : this.flags[y][x];
     let beam = [];
     for (let y = 0; y < this.board.height; y++) {
       for (let x = 0; x < this.board.width; x++) {
+        if (f(x, y) & CELL_FLAGS.NO_PICKUP) continue;
         beam.push({
           board: this.board, x, y, startX: x, startY: y,
           path: [{x, y}], moves: [], prevDir: null, weight: -Infinity,
@@ -1048,7 +1108,7 @@ class DoraSolver {
       }
     }
 
-    let best = null;
+    let best = null, bestQualified = null;
     const better = (a, b) => {
       if (b === null) return true;
       if (a.weight !== b.weight) return a.weight > b.weight;
@@ -1063,44 +1123,69 @@ class DoraSolver {
           if (s.prevDir && dir.dx === -s.prevDir.dx && dir.dy === -s.prevDir.dy) continue;
           const nx = s.x + dir.dx, ny = s.y + dir.dy;
           if (nx < 0 || nx >= this.board.width || ny < 0 || ny >= this.board.height) continue;
+          if (f(nx, ny) & CELL_FLAGS.NO_SWAP) continue;
 
           const childBoard = s.board.clone();
           childBoard.swap(s.x, s.y, nx, ny);
           const {weight, sim} = this.calculateWeight(childBoard);
+          // Steer the beam toward the first-combo target (no effect when 0);
+          // below the target, adjacent pairs count as partial progress
+          let steer = 0;
+          if (this.minFirstCombos > 0) {
+            steer = Math.min(sim.firstCombos, this.minFirstCombos) * this.tunable.firstComboSteer;
+            if (sim.firstCombos < this.minFirstCombos) {
+              steer += this.pairPotential(childBoard) * this.tunable.pairSteer;
+            }
+          }
           const child = {
             board: childBoard, x: nx, y: ny,
             startX: s.startX, startY: s.startY,
             path: [...s.path, {x: nx, y: ny}],
             moves: [...s.moves, dir.name],
-            prevDir: dir, weight,
+            prevDir: dir, weight, searchScore: weight + steer,
             comboCount: sim.totalCombos, firstCombos: sim.firstCombos, chains: sim.chains,
           };
           children.push(child);
           if (better(child, best)) best = child;
+          if (this.minFirstCombos > 0 && sim.firstCombos >= this.minFirstCombos
+              && better(child, bestQualified)) bestQualified = child;
         }
       }
       if (children.length === 0) break;
-      children.sort((a, b) => b.weight - a.weight);
-      beam = children.slice(0, this.beamWidth);
+      // Deduplicate interchangeable states (same board + same held cell):
+      // identical futures, so keep only the best-scoring one. Frees beam
+      // slots for genuinely different boards instead of near-clones.
+      const seen = new Map();
+      for (const c of children) {
+        const key = c.board.grid.join(';') + '#' + c.x + ',' + c.y;
+        const prev = seen.get(key);
+        if (prev === undefined || c.searchScore > prev.searchScore) seen.set(key, c);
+      }
+      const unique = [...seen.values()];
+      unique.sort((a, b) => b.searchScore - a.searchScore);
+      beam = unique.slice(0, this.beamWidth);
       if (this.verbose && step % 5 === 4) {
         console.log(`[DoraSolver] step ${step + 1}/${this.maxPath} best weight=${best.weight} combos=${best.comboCount}`);
       }
     }
 
-    if (best === null) {
+    // Prefer the best solution meeting the first-combo target; fall back to
+    // the global best (caller checks firstCombos and may abort).
+    const pick = bestQualified ?? best;
+    if (pick === null) {
       return {startX: 0, startY: 0, path: [{x: 0, y: 0}], moves: [], score: 0, comboCount: 0, firstCombos: 0, chains: 0, board: this.board.clone()};
     }
     return {
-      startX: best.startX, startY: best.startY,
-      path: best.path, moves: best.moves,
-      score: best.weight, comboCount: best.comboCount,
-      firstCombos: best.firstCombos, chains: best.chains,
-      board: best.board,
+      startX: pick.startX, startY: pick.startY,
+      path: pick.path, moves: pick.moves,
+      score: pick.weight, comboCount: pick.comboCount,
+      firstCombos: pick.firstCombos, chains: pick.chains,
+      board: pick.board,
     };
   }
 }
 
 // Export for use in content script
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver};
+  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, CELL_FLAGS};
 }

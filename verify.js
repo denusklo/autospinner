@@ -1,7 +1,7 @@
 // Regression + verification suite for algorithm.js (run: `node verify.js`)
 // This is the canonical check required by CLAUDE.md R2 before shipping any
 // algorithm.js change. Exit code 0 = all pass.
-const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver} =
+const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, CELL_FLAGS} =
   require('./algorithm.js');
 
 let failures = 0;
@@ -105,6 +105,94 @@ for (let i = 0; i < BOARDS.length; i++) {
 }
 console.log(`A/B cascade-aware combos: legacy=${oldTotal} DoraSolver=${newTotal}`);
 check('A/B DoraSolver >= legacy pipeline', newTotal >= oldTotal, true);
+
+// --- Sealed columns (real-game special mode, PROJECT-FACTS P6/P9): runes in
+// sealed columns can be dragged but never dissolve ---
+
+// S1: run of 3 spanning col 0 clears normally; sealing col 0 leaves a pair -> nothing clears
+const sealA = mk([
+  [0,0,0,1,2,3],
+  [1,2,3,4,5,0],
+  [2,3,4,5,0,1],
+  [3,4,5,0,1,2],
+  [4,5,0,1,2,3],
+]);
+check('S1 unsealed baseline clears', BoardSimulator.resolve(sealA).totalCombos, 1);
+check('S1 sealed col 0 blocks the group', BoardSimulator.resolve(sealA, {sealedColumns: [0]}).totalCombos, 0);
+
+// S2: a group fully inside cols 1-4 still clears when 0 and 5 are sealed
+const sealB = mk([
+  [1,0,0,0,2,3],
+  [2,3,4,5,1,0],
+  [3,4,5,1,2,4],
+  [4,5,1,2,3,5],
+  [5,1,2,3,4,1],
+]);
+check('S2 inner group clears under seal', BoardSimulator.resolve(sealB, {sealedColumns: [0, 5]}).totalCombos, 1);
+check('S2 same board unsealed identical', BoardSimulator.resolve(sealB).totalCombos, 1);
+
+// S3: DoraSolver under seal stays self-consistent and never clears sealed cells
+const sealSol = new DoraSolver(mk(BOARDS[1]), {beamWidth: 100, maxPath: 20, sealedColumns: [0, 5]}).solve();
+const sealSim = BoardSimulator.resolve(sealSol.board, {sealedColumns: [0, 5]});
+check('S3 comboCount consistent under seal', sealSim.totalCombos, sealSol.comboCount);
+check('S3 no cleared cell in sealed columns',
+  sealSim.groups.every(g => g.cells.every(([x]) => x !== 0 && x !== 5)), true);
+
+// --- Per-cell CELL_FLAGS: general board-effect constraints, composable with
+// sealedColumns (future-proofing for combined effects) ---
+
+const emptyFlags = () => Array.from({length: 5}, () => Array(6).fill(0));
+
+// S4: per-cell NO_DISSOLVE breaks the same run S1 tested column-sealing on
+const f4 = emptyFlags();
+f4[0][0] = CELL_FLAGS.NO_DISSOLVE;
+check('S4 per-cell NO_DISSOLVE blocks the group', BoardSimulator.resolve(sealA, {flags: f4}).totalCombos, 0);
+
+// S5: NO_PICKUP+NO_SWAP (frozen rune) — solver never starts on it or enters it
+const f5 = emptyFlags();
+f5[2][3] = CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
+const frozenSol = new DoraSolver(mk(BOARDS[2]), {beamWidth: 100, maxPath: 20, flags: f5}).solve();
+check('S5 path avoids frozen cell (3,2)', frozenSol.path.every(p => !(p.x === 3 && p.y === 2)), true);
+check('S5 still finds combos around it', frozenSol.comboCount > 0, true);
+
+// S6: combination — sealed cols 0,5 AND a frozen cell AND a per-cell no-dissolve
+const f6 = emptyFlags();
+f6[1][2] = CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
+f6[3][3] = CELL_FLAGS.NO_DISSOLVE;
+const comboSol = new DoraSolver(mk(BOARDS[1]), {beamWidth: 100, maxPath: 20, sealedColumns: [0, 5], flags: f6}).solve();
+const comboSim = BoardSimulator.resolve(comboSol.board, {sealedColumns: [0, 5], flags: f6});
+check('S6 combined constraints: comboCount consistent', comboSim.totalCombos, comboSol.comboCount);
+check('S6 combined constraints: path avoids frozen cell (2,1)', comboSol.path.every(p => !(p.x === 2 && p.y === 1)), true);
+check('S6 combined constraints: no cleared cell sealed or no-dissolve',
+  comboSim.groups.every(g => g.cells.every(([x, y]) => x !== 0 && x !== 5 && !(x === 3 && y === 3))), true);
+
+// --- minFirstCombos: steer the beam toward a FIRST-wave combo target ---
+
+// S7: on BOARDS[4] the weight-optimal solution has only 3 first-wave combos;
+// with minFirstCombos=4 the solver must return a qualifying path instead
+// (accepting a small weight trade-off).
+const b5base = new DoraSolver(mk(BOARDS[4]), {beamWidth: 200, maxPath: 30}).solve();
+check('S7 baseline first-wave combos (documents the trade-off)', b5base.firstCombos, 3);
+const b5min = new DoraSolver(mk(BOARDS[4]), {beamWidth: 200, maxPath: 30, minFirstCombos: 4}).solve();
+check('S7 steered solution meets first-combo target', b5min.firstCombos >= 4, true);
+check('S7 steered firstCombos consistent with independent resolve',
+  BoardSimulator.resolve(b5min.board).firstCombos, b5min.firstCombos);
+let s7wf = b5min.path[0].x === b5min.startX && b5min.path[0].y === b5min.startY
+  && b5min.moves.length === b5min.path.length - 1;
+for (let j = 1; j < b5min.path.length; j++) {
+  const d = Math.abs(b5min.path[j].x - b5min.path[j - 1].x) + Math.abs(b5min.path[j].y - b5min.path[j - 1].y);
+  if (d !== 1) s7wf = false;
+}
+check('S7 steered solution well-formed', s7wf, true);
+
+// --- Beam dedup + pair steering (search-quality upgrades) ---
+
+// S8: dedup keeps the search deterministic — identical runs, identical output
+const s8a = new DoraSolver(mk(BOARDS[2]), {beamWidth: 100, maxPath: 20}).solve();
+const s8b = new DoraSolver(mk(BOARDS[2]), {beamWidth: 100, maxPath: 20}).solve();
+check('S8 deterministic across runs', JSON.stringify(s8a.path), JSON.stringify(s8b.path));
+check('S8 pairPotential counts pairs (sealA row0 pair after sealing col 0)',
+  new DoraSolver(sealA, {sealedColumns: [0]}).pairPotential(sealA) >= 1, true);
 
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---
 const smoke = mk([[0,0,0,1,2,3],[1,2,3,4,5,0],[2,3,4,5,0,1],[3,4,5,0,1,2],[4,5,0,1,2,3]]);

@@ -612,42 +612,26 @@ class TOSAutoSpinner {
       const board = new Board();
       board.fromArray(boardState);
 
-      // Generate target board with maximized combos
-      console.log('Generating target board...');
-      const maximizer = new ComboMaximizer(board);
-      const targetBoard = maximizer.generateTargetBoard();
-
       console.log('Current board:');
       board.print();
-      console.log('Target board:');
-      targetBoard.print();
+      console.log('[TOS] BOARD=' + JSON.stringify(boardState));
 
-      // Calculate expected score of target board
-      const targetMatcher = new MatchFinder(targetBoard);
-      const targetScore = targetMatcher.calculateScore();
-      console.log('Target board would score:', targetScore);
+      this.updateStatus('Solving (DoraSolver beam search)...');
 
-      this.updateStatus(`Finding path... (Target: ${targetScore.comboCount} combos, ${targetScore.score} pts)`);
+      // DoraSolver: cascade-aware beam search ported from docs/autodora-algorithm-spec.md.
+      // beamWidth 200 keeps in-browser solve time around 200ms (measured in Node A/B).
+      const solver = new DoraSolver(board, {beamWidth: 200, maxPath: 30});
+      const solution = solver.solve();
 
-      // Use beam search to find path to target
-      console.log('Running beam search (this may take a few seconds)...');
-      const beamSolver = new BeamSearchSolver(board, 30, 40);  // Increased: beam width 30, max moves 40
-      const solution = beamSolver.solve(targetBoard);
-
-      console.log('Solution found:', solution);
-      console.log('Score:', solution.score);
-      console.log('Combo count:', solution.comboCount);
-      console.log('Start position:', `(${solution.startX}, ${solution.startY})`);
-      console.log('Path length:', solution.path.length, 'moves');
-
-      // Log the complete path
-      console.log('=== CALCULATED PATH ===');
-      console.log('Movement sequence:', solution.moves || []);
-      console.log('Grid path:');
-      solution.path.forEach((pos, idx) => {
-        console.log(`  Step ${idx}: (${pos.x}, ${pos.y})`);
-      });
-      console.log('=====================');
+      console.log('[TOS] SOLUTION=' + JSON.stringify({
+        start: [solution.startX, solution.startY],
+        moveCount: solution.moves.length,
+        score: solution.score,
+        combos: solution.comboCount,
+        firstCombos: solution.firstCombos,
+        chains: solution.chains
+      }));
+      console.log('[TOS] PATH=' + JSON.stringify(solution.moves));
 
       // Convert grid coordinates to pixel coordinates
       const pixelPath = this.gridPathToPixelPath(solution.path);
@@ -1023,29 +1007,50 @@ class TOSAutoSpinner {
       console.log(row);
     }
 
-    // Calculate actual score
+    // Combo groups on the read board (exact model: no double counting,
+    // L/T shapes merged — do NOT use legacy MatchFinder here, it overcounts)
     const boardObj = new Board();
     boardObj.fromArray(board);
-    const matcher = new MatchFinder(boardObj);
-    const scoreData = matcher.calculateScore();
+    const groups = BoardSimulator.findComboGroups(boardObj);
+    console.log('Match groups on read board:');
+    groups.forEach((g, idx) => {
+      console.log(`  ${idx + 1}. ${names[g.type]} x${g.cells.length}`);
+    });
 
-    console.log('\nActual Results:');
-    console.log('  Combos formed:', scoreData.comboCount);
-    console.log('  Total score:', scoreData.score);
-
-    if (scoreData.matches.length > 0) {
-      console.log('  Matches:');
-      scoreData.matches.forEach((match, idx) => {
-        console.log(`    ${idx + 1}. ${names[match.type]} x${match.positions.length} (${match.direction})`);
-      });
-    }
-
-    // Compare with expected if available
-    if (this.currentSolution) {
-      console.log('\nComparison:');
-      console.log('  Expected score:', this.currentSolution.score);
-      console.log('  Actual score:', scoreData.score);
-      console.log('  Difference:', scoreData.score - this.currentSolution.score);
+    // Compare read-back against the planned final board. Mismatches inside
+    // planned match groups are expected: the game dims matched runes during
+    // the clear animation, and the color reader can misidentify a dimmed
+    // rune (e.g. dimmed Dark reads as Fire — both have r=153, see
+    // PROJECT-FACTS F4). Mismatches OUTSIDE match groups are real drag
+    // deviations and must be investigated.
+    if (this.currentSolution && this.currentSolution.board && this.currentSolution.board.get) {
+      const planned = this.currentSolution.board;
+      const matchedCells = new Set();
+      for (const g of BoardSimulator.findComboGroups(planned)) {
+        for (const [x, y] of g.cells) matchedCells.add(x + ',' + y);
+      }
+      let same = 0;
+      const totalCells = board.length * board[0].length;
+      const execErrors = [], animArtifacts = [];
+      for (let y = 0; y < board.length; y++) {
+        for (let x = 0; x < board[y].length; x++) {
+          if (board[y][x] === planned.get(x, y)) { same++; continue; }
+          const rec = [x, y, names[planned.get(x, y)] || '?', names[board[y][x]] || '?'];
+          (matchedCells.has(x + ',' + y) ? animArtifacts : execErrors).push(rec);
+        }
+      }
+      console.log('[TOS] RESULT=' + JSON.stringify({
+        cellsMatching: same + '/' + totalCells,
+        plannedCombos: this.currentSolution.comboCount,
+        plannedChains: this.currentSolution.chains,
+        execErrors,
+        animArtifacts
+      }));
+      if (execErrors.length === 0) {
+        console.log(`Drag executed exactly as planned. True result: ${this.currentSolution.comboCount} combos (${this.currentSolution.chains} chains).`);
+      } else {
+        console.log('WARNING: drag deviated from plan at cells [x,y,planned,read]:', JSON.stringify(execErrors));
+      }
     }
 
     console.log('========================');

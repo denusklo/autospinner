@@ -851,7 +851,256 @@ class RuneSolver {
   }
 }
 
+/**
+ * Exact forward model of the puzzle (per docs/autodora-algorithm-spec.md §2 Steps 3-4).
+ * Unlike MatchFinder, this: (a) never double-counts runs of 4+, (b) merges
+ * L/T-shaped connected matches into one combo via flood fill, (c) simulates
+ * clear -> gravity -> cascade chains. No skyfall: cleared cells stay empty
+ * (spec §7 states skyfall is animation-only for solving).
+ * Rune encoding is this project's (0=Water..5=Heart), NOT the spec's — see
+ * PROJECT-FACTS.md F9.
+ */
+class BoardSimulator {
+  /**
+   * Find combo groups on a static board.
+   * @returns {Array<{type: number, cells: Array<[number, number]>}>}
+   */
+  static findComboGroups(board) {
+    const w = board.width, h = board.height;
+    const marked = Array.from({length: h}, () => Array(w).fill(false));
+
+    // Row scan: mark maximal runs of 3+ (advance past each run — no double count)
+    for (let y = 0; y < h; y++) {
+      let x = 0;
+      while (x < w) {
+        const type = board.get(x, y);
+        if (type === -1) { x++; continue; }
+        let end = x + 1;
+        while (end < w && board.get(end, y) === type) end++;
+        if (end - x >= 3) {
+          for (let i = x; i < end; i++) marked[y][i] = true;
+        }
+        x = end;
+      }
+    }
+
+    // Column scan
+    for (let x = 0; x < w; x++) {
+      let y = 0;
+      while (y < h) {
+        const type = board.get(x, y);
+        if (type === -1) { y++; continue; }
+        let end = y + 1;
+        while (end < h && board.get(x, end) === type) end++;
+        if (end - y >= 3) {
+          for (let i = y; i < end; i++) marked[i][x] = true;
+        }
+        y = end;
+      }
+    }
+
+    // Flood fill (explicit stack) merging orthogonally-connected same-color marked cells
+    const groups = [];
+    const visited = Array.from({length: h}, () => Array(w).fill(false));
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!marked[y][x] || visited[y][x]) continue;
+        const type = board.get(x, y);
+        const cells = [];
+        const stack = [[x, y]];
+        visited[y][x] = true;
+        while (stack.length > 0) {
+          const [cx, cy] = stack.pop();
+          cells.push([cx, cy]);
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+            if (visited[ny][nx] || !marked[ny][nx]) continue;
+            if (board.get(nx, ny) !== type) continue;
+            visited[ny][nx] = true;
+            stack.push([nx, ny]);
+          }
+        }
+        groups.push({type, cells});
+      }
+    }
+    return groups;
+  }
+
+  /**
+   * Clear matches, apply gravity, repeat until stable (spec §2 Step 4).
+   * Mutates a clone; the input board is untouched.
+   * @returns {{totalCombos, firstCombos, chains, groups, boardAfter}}
+   */
+  static resolve(board) {
+    const work = board.clone();
+    let totalCombos = 0, firstCombos = 0, chains = 0;
+    const allGroups = [];
+
+    while (true) {
+      const groups = BoardSimulator.findComboGroups(work);
+      if (groups.length === 0) break;
+      chains++;
+      if (chains === 1) firstCombos = groups.length;
+      totalCombos += groups.length;
+      allGroups.push(...groups);
+
+      for (const g of groups) {
+        for (const [x, y] of g.cells) work.set(x, y, -1);
+      }
+
+      // Gravity: per column, compact non-empty cells to the bottom
+      for (let x = 0; x < work.width; x++) {
+        let writeY = work.height - 1;
+        for (let y = work.height - 1; y >= 0; y--) {
+          const v = work.get(x, y);
+          if (v !== -1) {
+            work.set(x, writeY, v);
+            if (writeY !== y) work.set(x, y, -1);
+            writeY--;
+          }
+        }
+      }
+    }
+
+    return {totalCombos, firstCombos, chains, groups: allGroups, boardAfter: work};
+  }
+}
+
+/**
+ * Beam-search solver ported from docs/autodora-algorithm-spec.md (DoraHeart V2),
+ * adapted to this project: rune encoding 0=Water..5=Heart (PROJECT-FACTS F9),
+ * board grid[y][x] 6 wide x 5 high, 4-directional by default (8-dir is spec
+ * default but diagonal drags are UNVERIFIED on the louisalflame simulator —
+ * enable via moveMode: 8 only after a real-browser test).
+ *
+ * Spec-published constants used as-is: comboBonus x4 (spec §2 Step 5), final
+ * tiebreak order weight desc -> combos desc -> path length asc (spec §2 Step 8),
+ * no-immediate-backtrack rule (spec §1), defaults maxPath=30 / beamWidth=450
+ * (spec §7). Constants in TUNABLE were NOT published (spec §9) — tune via A/B
+ * on fixed boards, never by feel.
+ */
+class DoraSolver {
+  constructor(board, options = {}) {
+    this.board = board;
+    this.beamWidth = options.beamWidth ?? 450;
+    this.maxPath = options.maxPath ?? 30;
+    this.moveMode = options.moveMode ?? 4;
+    this.verbose = options.verbose ?? false;
+    // TUNABLE (spec §9: exact values unpublished). colorWeights indexed by
+    // PROJECT encoding: [Water, Fire, Wood, Light, Dark, Heart].
+    this.tunable = Object.assign({
+      colorWeights: [1, 1, 1, 1, 1, 1],
+      comboBonus: 4,      // spec-published
+      bigGroupBonus: 1,   // per orb beyond 3 in a combo group
+      chainBonus: 2,      // per cascade wave beyond the first
+    }, options.tunable || {});
+  }
+
+  static get DIRS8() {
+    return [
+      {dx: 0, dy: -1, name: 'up'},
+      {dx: 1, dy: -1, name: 'up-right'},
+      {dx: 1, dy: 0, name: 'right'},
+      {dx: 1, dy: 1, name: 'down-right'},
+      {dx: 0, dy: 1, name: 'down'},
+      {dx: -1, dy: 1, name: 'down-left'},
+      {dx: -1, dy: 0, name: 'left'},
+      {dx: -1, dy: -1, name: 'up-left'},
+    ];
+  }
+
+  get dirs() {
+    const all = DoraSolver.DIRS8;
+    return this.moveMode === 8 ? all : all.filter(d => d.dx === 0 || d.dy === 0);
+  }
+
+  /**
+   * Spec §2 Step 5 (calculateWeight), on the fully-resolved cascade result.
+   */
+  calculateWeight(board) {
+    const sim = BoardSimulator.resolve(board);
+    const t = this.tunable;
+    let weight = 0;
+    for (const g of sim.groups) {
+      weight += t.colorWeights[g.type] ?? 1;
+      weight += Math.max(0, g.cells.length - 3) * t.bigGroupBonus;
+    }
+    weight += sim.totalCombos * t.comboBonus;
+    weight += Math.max(0, sim.chains - 1) * t.chainBonus;
+    return {weight, sim};
+  }
+
+  /**
+   * Beam search: seed every cell -> expand (no immediate backtrack) -> score
+   * -> sort -> prune to beamWidth -> repeat maxPath times (spec §2 Steps 1-7).
+   * @returns best solution, interface-compatible with content.js consumers:
+   *   {startX, startY, path, moves, score, comboCount, firstCombos, chains, board}
+   */
+  solve() {
+    let beam = [];
+    for (let y = 0; y < this.board.height; y++) {
+      for (let x = 0; x < this.board.width; x++) {
+        beam.push({
+          board: this.board, x, y, startX: x, startY: y,
+          path: [{x, y}], moves: [], prevDir: null, weight: -Infinity,
+        });
+      }
+    }
+
+    let best = null;
+    const better = (a, b) => {
+      if (b === null) return true;
+      if (a.weight !== b.weight) return a.weight > b.weight;
+      if (a.comboCount !== b.comboCount) return a.comboCount > b.comboCount;
+      return a.moves.length < b.moves.length;
+    };
+
+    for (let step = 0; step < this.maxPath; step++) {
+      const children = [];
+      for (const s of beam) {
+        for (const dir of this.dirs) {
+          if (s.prevDir && dir.dx === -s.prevDir.dx && dir.dy === -s.prevDir.dy) continue;
+          const nx = s.x + dir.dx, ny = s.y + dir.dy;
+          if (nx < 0 || nx >= this.board.width || ny < 0 || ny >= this.board.height) continue;
+
+          const childBoard = s.board.clone();
+          childBoard.swap(s.x, s.y, nx, ny);
+          const {weight, sim} = this.calculateWeight(childBoard);
+          const child = {
+            board: childBoard, x: nx, y: ny,
+            startX: s.startX, startY: s.startY,
+            path: [...s.path, {x: nx, y: ny}],
+            moves: [...s.moves, dir.name],
+            prevDir: dir, weight,
+            comboCount: sim.totalCombos, firstCombos: sim.firstCombos, chains: sim.chains,
+          };
+          children.push(child);
+          if (better(child, best)) best = child;
+        }
+      }
+      if (children.length === 0) break;
+      children.sort((a, b) => b.weight - a.weight);
+      beam = children.slice(0, this.beamWidth);
+      if (this.verbose && step % 5 === 4) {
+        console.log(`[DoraSolver] step ${step + 1}/${this.maxPath} best weight=${best.weight} combos=${best.comboCount}`);
+      }
+    }
+
+    if (best === null) {
+      return {startX: 0, startY: 0, path: [{x: 0, y: 0}], moves: [], score: 0, comboCount: 0, firstCombos: 0, chains: 0, board: this.board.clone()};
+    }
+    return {
+      startX: best.startX, startY: best.startY,
+      path: best.path, moves: best.moves,
+      score: best.weight, comboCount: best.comboCount,
+      firstCombos: best.firstCombos, chains: best.chains,
+      board: best.board,
+    };
+  }
+}
+
 // Export for use in content script
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver};
+  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver};
 }

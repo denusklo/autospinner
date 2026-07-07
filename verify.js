@@ -1,7 +1,7 @@
 // Regression + verification suite for algorithm.js (run: `node verify.js`)
 // This is the canonical check required by CLAUDE.md R2 before shipping any
 // algorithm.js change. Exit code 0 = all pass.
-const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, CELL_FLAGS} =
+const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS} =
   require('./algorithm.js');
 
 let failures = 0;
@@ -193,6 +193,168 @@ const s8b = new DoraSolver(mk(BOARDS[2]), {beamWidth: 100, maxPath: 20}).solve()
 check('S8 deterministic across runs', JSON.stringify(s8a.path), JSON.stringify(s8b.path));
 check('S8 pairPotential counts pairs (sealA row0 pair after sealing col 0)',
   new DoraSolver(sealA, {sealedColumns: [0]}).pairPotential(sealA) >= 1, true);
+
+// --- TargetPlanner: near-guaranteed first-wave targets (PROJECT-FACTS P10) ---
+
+// S9: a real board (live 2026-07-07) where DoraSolver@beam800 found only
+// first=2 — the planner must construct first=5, and prove N=7 impossible
+// (7 triples need 21 cells; only 20 are resolvable with cols 0,5 sealed).
+const hardBoard = mk([
+  [4,0,5,2,5,2],
+  [4,4,1,1,0,4],
+  [2,2,5,5,1,1],
+  [4,3,0,4,1,1],
+  [2,1,3,2,0,2],
+]);
+const tp5 = new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstCombos: 5}).solve();
+check('S9 planner reaches first=5 where beam search failed', tp5.reason, 'ok');
+check('S9 planner solution verifies independently',
+  BoardSimulator.resolve(tp5.solution.board, {sealedColumns: [0, 5]}).firstCombos >= 5, true);
+let s9wf = tp5.solution.path[0].x === tp5.solution.startX && tp5.solution.path[0].y === tp5.solution.startY
+  && tp5.solution.moves.length === tp5.solution.path.length - 1;
+for (let j = 1; j < tp5.solution.path.length; j++) {
+  const d = Math.abs(tp5.solution.path[j].x - tp5.solution.path[j - 1].x)
+    + Math.abs(tp5.solution.path[j].y - tp5.solution.path[j - 1].y);
+  if (d !== 1) s9wf = false;
+}
+check('S9 planner path well-formed', s9wf, true);
+check('S9 planner proves N=7 infeasible in 20 cells',
+  new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstCombos: 7}).solve().reason, 'no-feasible-target');
+
+// --- Exact-N mode (combo shields: extra combos harmful) ---
+
+const ex4 = new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstCombos: 4, exact: true}).solve();
+check('S11 planner exact-4 hits exactly 4', ex4.reason === 'ok'
+  && BoardSimulator.resolve(ex4.solution.board, {sealedColumns: [0, 5]}).firstCombos === 4, true);
+const dex3 = new DoraSolver(hardBoard, {sealedColumns: [0, 5], beamWidth: 200, maxPath: 30, minFirstCombos: 3, exactFirstCombos: true}).solve();
+check('S11 DoraSolver exact-3 hits exactly 3', dex3.firstCombos, 3);
+
+// --- Router v2 (group-aware scoring + assignment potential): 7 first-wave
+// groups routable on a live board where router v1 failed at beam 1600 ---
+const seven = mk([
+  [1,1,0,3,5,0],
+  [0,0,1,3,4,4],
+  [5,4,4,2,5,5],
+  [5,1,1,4,0,2],
+  [4,3,2,3,1,5],
+]);
+const r7min = new TargetPlanner(seven, {minFirstCombos: 7, beamWidth: 1000, maxPath: 120, maxTargets: 6}).solve();
+check('S12 router v2 constructs 7+ first-wave combos', r7min.reason, 'ok');
+check('S12 honest (independent resolve)', BoardSimulator.resolve(r7min.solution.board).firstCombos >= 7, true);
+
+// --- First-wave RUNE count (楊玉環 "NUM N": clear >= N runes first batch) ---
+
+// S14: BoardSimulator reports firstRunes = orbs dissolved in wave 1
+const fr = BoardSimulator.resolve(run4); // run-of-4 in row 0 => 4 runes, 1 combo
+check('S14 firstRunes counts wave-1 orbs', fr.firstRunes, 4);
+check('S14 firstCombos still counts groups', fr.firstCombos, 1);
+
+// S15: DoraSolver can target a first-wave rune count; solution meets it and
+// is honest against an independent resolve
+const runeSol = new DoraSolver(mk(BOARDS[2]), {beamWidth: 200, maxPath: 30, minFirstRunes: 9}).solve();
+check('S15 solution meets first-rune target', runeSol.firstRunes >= 9, true);
+check('S15 firstRunes consistent with independent resolve',
+  BoardSimulator.resolve(runeSol.board).firstRunes, runeSol.firstRunes);
+
+// S16: exact rune mode — firstRunes must EQUAL the target (overshoot rejected)
+const exactRunes = new DoraSolver(mk(BOARDS[2]), {beamWidth: 200, maxPath: 30, minFirstRunes: 12, exactFirstRunes: true}).solve();
+check('S16 exact rune target hit precisely', exactRunes.firstRunes, 12);
+check('S16 exact honest (independent resolve)', BoardSimulator.resolve(exactRunes.board).firstRunes, 12);
+
+// --- Priority cells (electric runes, P11): first-wave clearing rewarded,
+// cell itself untouchable (NO_PICKUP|NO_SWAP) but still dissolvable ---
+
+// S13: electric Wood at (3,2) sits under a ready vertical wood triple
+// (3,0),(3,1),(3,2). With the cell flagged untouchable and prioritized, the
+// solver must produce a solution whose FIRST wave clears it, with a path
+// that never enters (3,2).
+const elecBoard = mk([
+  [2,0,1,2,4,5],
+  [0,1,0,2,5,4],
+  [1,0,5,2,0,1],
+  [5,4,1,0,1,0],
+  [4,5,0,1,3,3],
+]);
+const f13 = Array.from({length: 5}, () => Array(6).fill(0));
+f13[2][3] = CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
+const elecSol = new DoraSolver(elecBoard, {
+  beamWidth: 100, maxPath: 15, flags: f13, priorityCells: [{x: 3, y: 2}],
+}).solve();
+const elecSim = BoardSimulator.resolve(elecSol.board, {flags: f13});
+const elecFirstWave = new Set();
+for (const g of elecSim.groups.slice(0, elecSim.firstCombos)) for (const [x, y] of g.cells) elecFirstWave.add(x * 10 + y);
+check('S13 first wave clears the electric cell', elecFirstWave.has(3 * 10 + 2), true);
+check('S13 path never enters the electric cell', elecSol.path.every(p => !(p.x === 3 && p.y === 2)), true);
+
+// --- solveMaxFirstCombos: find the highest achievable first-wave target ---
+
+// S10: on hardBoard the bound is min(colorBound 8, floor(20/3)=6) = 6; the
+// planner is known to reach 5, so max mode must achieve >= 5 and stay honest.
+const maxRes = solveMaxFirstCombos(hardBoard, {sealedColumns: [0, 5]});
+check('S10 bound computed correctly', maxRes.bound, 6);
+check('S10 max mode achieves at least 5', maxRes.achieved >= 5, true);
+check('S10 achieved is honest (independent resolve)',
+  BoardSimulator.resolve(maxRes.solution.board, {sealedColumns: [0, 5]}).firstCombos >= maxRes.achieved, true);
+
+// --- Start/end pinning (phone --start/--end): restrict seed + final cell ---
+
+// Invariant every pinned solution must satisfy: either no path was found
+// (moves 0) or both endpoints match the pins exactly. A path that silently
+// ignores a pin is the failure this feature must never produce.
+const pinsRespected = (sol, start, end) => {
+  if (sol.moves.length === 0) return true; // degenerate -> caller aborts
+  const a = sol.path[0], b = sol.path[sol.path.length - 1];
+  return (!start || (a.x === start.x && a.y === start.y))
+      && (!end || (b.x === end.x && b.y === end.y));
+};
+
+// SP1: startCells restricts the seed — solution begins exactly there
+const sp1 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 12, startCells: [{x: 5, y: 1}]}).solve();
+check('SP1 start pin: startX,startY', [sp1.startX, sp1.startY], [5, 1]);
+check('SP1 start pin: path[0] is the start cell', [sp1.path[0].x, sp1.path[0].y], [5, 1]);
+
+// SP2: endCell forces the LAST held cell (reachable within maxPath)
+const sp2 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 12, endCell: {x: 2, y: 2}}).solve();
+const sp2last = sp2.path[sp2.path.length - 1];
+check('SP2 end pin: last path cell is the end cell', [sp2last.x, sp2last.y], [2, 2]);
+
+// SP3: start === end (the user's "5,1 -> 5,1" loop) — a real closed drag
+const sp3 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 400, maxPath: 8, startCells: [{x: 5, y: 1}], endCell: {x: 5, y: 1}}).solve();
+const sp3last = sp3.path[sp3.path.length - 1];
+check('SP3 loop starts at pin', [sp3.path[0].x, sp3.path[0].y], [5, 1]);
+check('SP3 loop ends at pin', [sp3last.x, sp3last.y], [5, 1]);
+check('SP3 loop actually moves (non-empty)', sp3.moves.length > 0, true);
+let sp3wf = true;
+for (let j = 1; j < sp3.path.length; j++) {
+  const d = Math.abs(sp3.path[j].x - sp3.path[j - 1].x) + Math.abs(sp3.path[j].y - sp3.path[j - 1].y);
+  if (d !== 1) sp3wf = false;
+}
+check('SP3 loop well-formed (unit steps)', sp3wf, true);
+
+// SP4: unreachable end within maxPath -> degenerate (moves 0), caller aborts.
+// (5,1)->(0,4) is Manhattan distance 8; maxPath 2 cannot reach it.
+const sp4 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 2, startCells: [{x: 5, y: 1}], endCell: {x: 0, y: 4}}).solve();
+check('SP4 unreachable end -> no path (moves 0)', sp4.moves.length, 0);
+
+// SP5: composes with sealedColumns — pins honored AND sealed cells never clear
+const sp5 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 20, startCells: [{x: 2, y: 2}], sealedColumns: [0, 5]}).solve();
+check('SP5 start pin honored under seal', [sp5.startX, sp5.startY], [2, 2]);
+check('SP5 comboCount consistent under seal', BoardSimulator.resolve(sp5.board, {sealedColumns: [0, 5]}).totalCombos, sp5.comboCount);
+check('SP5 no cleared cell in sealed columns',
+  BoardSimulator.resolve(sp5.board, {sealedColumns: [0, 5]}).groups.every(g => g.cells.every(([x]) => x !== 0 && x !== 5)), true);
+
+// SP6: composes with minFirstRunes steering — pins never violated
+const sp6 = new DoraSolver(mk(BOARDS[2]), {beamWidth: 300, maxPath: 12, startCells: [{x: 5, y: 1}], endCell: {x: 5, y: 1}, minFirstRunes: 3}).solve();
+check('SP6 pins respected while steering firstRunes', pinsRespected(sp6, {x: 5, y: 1}, {x: 5, y: 1}), true);
+
+// SP7: planner path (solveMaxFirstCombos + TargetPlanner) also seeds from the
+// pin — every produced solution must start there
+const sp7 = solveMaxFirstCombos(hardBoard, {sealedColumns: [0, 5], startCells: [{x: 1, y: 4}]});
+check('SP7 maxFirstCombos honors start pin', [sp7.solution.startX, sp7.solution.startY], [1, 4]);
+check('SP7 maxFirstCombos still honest', BoardSimulator.resolve(sp7.solution.board, {sealedColumns: [0, 5]}).firstCombos >= sp7.achieved, true);
+const sp7tp = new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstCombos: 5, startCells: [{x: 1, y: 4}]}).solve();
+check('SP7 planner never routes from a non-pinned start',
+  sp7tp.reason !== 'ok' || (sp7tp.solution.startX === 1 && sp7tp.solution.startY === 4), true);
 
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---
 const smoke = mk([[0,0,0,1,2,3],[1,2,3,4,5,0],[2,3,4,5,0,1],[3,4,5,0,1,2],[4,5,0,1,2,3]]);

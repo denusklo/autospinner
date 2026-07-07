@@ -12,25 +12,52 @@
  *   node phone/autospin.js --dry              # everything except the touch
  *   node phone/autospin.js --confirm          # print recognized board + path, then
  *                                             # wait for Enter before actually spinning
- *   node phone/autospin.js --first-min-combos 4  # abort (no touch) unless the plan's
- *                                                # FIRST-wave combos reach 4
+ *   node phone/autospin.js --first-combos 4      # EXACTLY 4 first-wave combos (combo-shield
+ *                                                # mode; overshoot rejected too)
+ *   node phone/autospin.js --first-combos 7+     # at least 7 first-wave combos
+ *   node phone/autospin.js --first-combos max    # highest achievable (never aborts)
+ *   node phone/autospin.js --first-runes 20      # clear EXACTLY 20 RUNES in the first wave
+ *                                                # (楊玉環 "NUM N" boss: read N off the enemy
+ *                                                # badge; distinct from combo COUNT)
+ *   node phone/autospin.js --first-runes 20+     # at least 20 first-wave runes
+ *     For all three: DoraSolver tries first, TargetPlanner constructs the
+ *     arrangement if the beam misses, abort only if impossible/unroutable
+ *     (no touch sent on abort). --first-min-combos N = legacy alias for N+.
  *   node phone/autospin.js --beam 800            # wider beam search (default 200; slower, finds more)
  *   node phone/autospin.js --max-path 40         # longer drag budget (default 30 moves)
- *   node phone/autospin.js --step-ms 10          # interval per touch point (default 16;
- *                                                # deadline-scheduled, accurate to ~1ms)
- *   node phone/autospin.js --steps-per-cell 3    # touch points per cell move (default 5)
- *                                                # ms per move = step-ms x steps-per-cell
+ *   node phone/autospin.js --move-ms 215         # ms per CELL move (decimals ok) — the direct,
+ *                                                # fine speed knob. The game drops the rune below
+ *                                                # a sharp cell-traversal time (~205ms on the
+ *                                                # shock stage); dial just above it. Default 240.
+ *   node phone/autospin.js --step-ms 24          # alt: per-touch-point time (× steps-per-cell
+ *                                                # = per move). Whole numbers jump 10ms/move, so
+ *                                                # prefer --move-ms near the drop threshold.
+ *   node phone/autospin.js --steps-per-cell 10   # touch points per cell (default 10 = 18px steps)
  *   node phone/autospin.js --check            # capture + recognize, write phone/check.html
  *                                             # (screenshot with recognition overlaid) — no solve, no touch
  *   node phone/autospin.js --board my.txt     # manual board (skips recognition), then spin
  *   node phone/autospin.js --board my.txt --dry
+ *   node phone/autospin.js --start 5,1        # pin the drag's START cell (col,row,
+ *                                             # 0-indexed: col 0-5, row 0-4)
+ *   node phone/autospin.js --end 5,1          # pin the drag's END cell; --start and
+ *                                             # --end are independent (may differ) and
+ *                                             # compose with every other flag below.
+ *                                             # If the end can't be reached within
+ *                                             # --max-path the run aborts (no touch).
  *   node phone/autospin.js --sealed 0,5       # force sealed columns; --sealed none disables
+ *   node phone/autospin.js --shock-bases l    # set electric-rune base element(s) when the
+ *                                             # bright glow defeats auto-detection: one letter
+ *                                             # for all, or a comma list mapping to the
+ *                                             # ELECTRIC_CELLS row-major order (e.g. w,l,d)
  *
  * Board file: 5 lines x 6 tokens (comma/space separated). Tokens: w=Water
  * f=Fire g=Wood(green) l=Light d=Dark h=Heart or digits 0-5. Suffixes
  * (combinable): `*` thorn/sealed-column marker, `!` frozen (cannot pick up or
  * drag through: CELL_FLAGS NO_PICKUP|NO_SWAP), `x` this cell cannot dissolve
- * (CELL_FLAGS NO_DISSOLVE). Example line:  f* l w! gx h h*
+ * (CELL_FLAGS NO_DISSOLVE), `^` electric (P11: interrupts the drag if touched
+ * or passed through, still dissolves with its base element, and clearing it
+ * first-wave gets a big solver bonus — token g^ = electric Wood).
+ * Example line:  f* l w! g^ h h*
  *
  * Sealed columns (special-card mode): thorn-overlaid runes mark columns that
  * cannot dissolve but can be dragged through. Auto-detected from the thorn
@@ -43,16 +70,16 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Board, DoraSolver, CELL_FLAGS } = require('../algorithm.js');
+const { Board, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS } = require('../algorithm.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
 const ROWS = [1330, 1510, 1690, 1870, 2050];
 const PATCH_HALF = 55, PATCH_STEP = 5;
-// Drag timing is paced ON THE DEVICE via minitouch `w` commands (PROJECT-FACTS
-// P8, LESSONS L9/L10) — PC-side pacing is unreliable over adb/USB (burst
-// delivery drops the rune). Counter-verified exact: 50ms/move (5ms x 10) and
-// 80ms/move (8ms x 10). Faster than 50ms/move is UNTESTED.
-const MOVE_INTERVAL_MS = 5;  // per touch point, slept on-device
+// Drag pacing: PC-side deadline-scheduled writes. The held rune TRAILS the
+// finger and cuts corners at speed (into shock cells — P11); human-like
+// pacing plus turn dwells (gridPathToScreenPath) keep it on the finger's
+// path. Instant injection is only safe on hazard-free boards.
+const STEP_MS = 24;          // per touch point -> 240ms/move at 10 points/cell
 const STEPS_PER_CELL = 10;   // 18px per event on 180px cells
 
 // Rune encoding per PROJECT-FACTS F2: 0=Water 1=Fire 2=Wood 3=Light 4=Dark 5=Heart.
@@ -74,6 +101,8 @@ const SIGNATURES = [
   { type: 3, thorn: false, rgb: [241, 188, 51] },  // Light enhanced (white sparkle)
   { type: 4, thorn: false, rgb: [225, 77, 237] },  // Dark enhanced (white sparkle)
   { type: 5, thorn: false, rgb: [253, 183, 204] }, // Heart enhanced (white sparkle)
+  { type: 0, thorn: false, electric: true, rgb: [172, 248, 247] }, // Electric rune (flicker phase A)
+  { type: 0, thorn: false, electric: true, rgb: [191, 251, 250] }, // Electric rune (flicker phase B)
   { type: 0, thorn: true, rgb: [70, 98, 119] },    // Water + thorn
   { type: 1, thorn: true, rgb: [129, 61, 53] },    // Fire + thorn
   { type: 2, thorn: true, rgb: [59, 116, 62] },    // Wood + thorn
@@ -87,6 +116,7 @@ const TYPE_LETTERS = ['w', 'f', 'g', 'l', 'd', 'h'];
 const TYPE_CSS = ['#44a0e0', '#e03020', '#30c040', '#d0a020', '#a040d0', '#e060a0'];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const cellLabel = c => (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '')) + (c.thorn ? '*' : '');
 
 // ---------- capture + recognition ----------
 
@@ -120,7 +150,22 @@ function cellStats(img, cx, cy) {
   return { rgb: [r / n, g / n, b / n], darkPct: dark / n };
 }
 
+// Electric glow rule (P11): arcs push at least TWO channels near-white —
+// cyan arcs (wood/water base): g+b high, dims to (98,233,218); magenta arcs
+// (dark base): r+b high, g swings 135-207. Enhanced runes light up only ONE
+// channel pair partially (enhanced dark (225,77,237) is the near-miss — it
+// passes this candidate rule and is rejected later by the flicker test:
+// electric cells swing up to ~60/frame, all normal runes are frame-stable).
+const isElectricGlow = rgb => ((rgb[0] > 210 ? 1 : 0) + (rgb[1] > 210 ? 1 : 0) + (rgb[2] > 205 ? 1 : 0)) >= 2;
+
 function classify(stats) {
+  // Electric runes (P11): near-white cyan, flickering arcs. Interrupt the
+  // spin when touched or passed through. NOTE: single-frame whiteness can be
+  // a GHOST (arc flare bleeding from a neighboring shock) — final electric
+  // status requires persistence across frames (readBoardFromScreen).
+  if (isElectricGlow(stats.rgb)) {
+    return { type: 0, thorn: false, electric: true, dist: 0, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+  }
   let best = null, bestDist = Infinity;
   for (const sig of SIGNATURES) {
     const d = Math.hypot(stats.rgb[0] - sig.rgb[0], stats.rgb[1] - sig.rgb[1], stats.rgb[2] - sig.rgb[2]);
@@ -129,16 +174,111 @@ function classify(stats) {
   // Two independent thorn signals: nearest signature + dark-pixel share (P5).
   // Trust the dark-pixel metric when they disagree.
   const thorn = stats.darkPct > 0.2;
-  return { type: best.type, thorn, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+  return { type: best.type, thorn, electric: best.electric ?? false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+}
+
+/**
+ * Base element of an electric rune (P11/L16) via TEMPORAL MINIMUM. The arcs
+ * only ADD light, so the per-pixel minimum across many frames strips the
+ * transient glare and leaves the base. Then subtract the lowest channel (the
+ * white/glare floor) and read the residual hue — this cleanly separates all
+ * six elements for both normal runes AND shocks (measured temporal-min bases:
+ * Wood(22,121,16) Water(33,72,115) Dark(103,4,126) Light(102,61,1)
+ * Fire(148,18,2) Heart(194,34,110); Light shocks land at the same yellow
+ * residual (70,37,0)). Needs >=~8 frames to converge; returns -1 only if the
+ * residual is too weak to call.
+ * @param imgs array of >=8 captured frames
+ */
+function electricBase(imgs, cx, cy) {
+  // dense grid; per point take the darkest (min sum) sample across frames
+  const pts = [];
+  for (let dy = -60; dy <= 60; dy += 8) {
+    for (let dx = -60; dx <= 60; dx += 8) {
+      let best = null, bestSum = Infinity;
+      for (const img of imgs) {
+        const i = img.off + ((cy + dy) * img.w + (cx + dx)) * 4;
+        const r = img.buf[i], g = img.buf[i + 1], b = img.buf[i + 2];
+        if (r + g + b < bestSum) { bestSum = r + g + b; best = [r, g, b]; }
+      }
+      pts.push(best);
+    }
+  }
+  // average the darkest 40% of temporal-min points (edges catch base best)
+  pts.sort((a, b) => (a[0] + a[1] + a[2]) - (b[0] + b[1] + b[2]));
+  const keep = pts.slice(0, Math.ceil(pts.length * 0.4));
+  const m = [0, 1, 2].map(ch => keep.reduce((s, p) => s + p[ch], 0) / keep.length);
+  // strip the glare floor: subtract the lowest channel, read residual hue
+  const lo = Math.min(m[0], m[1], m[2]);
+  const r = m[0] - lo, g = m[1] - lo, b = m[2] - lo; // one of these is 0
+  const chroma = Math.max(r, g, b);
+  if (chroma < 20) return -1; // too washed to call
+  if (b < 1) {                 // blue is floor -> warm (Wood/Light/Fire)
+    if (g > r) return 2;                 // Wood
+    return g / r > 0.30 ? 3 : 1;         // Light (yellow) vs Fire (red)
+  }
+  if (g < 1) {                 // green floor -> Dark / Heart / Fire-shock
+    // A Fire SHOCK's arc lifts blue over green (green becomes floor) but the
+    // residual stays nearly pure red: b/r ~0.04-0.18. Heart sits ~0.47, Dark
+    // ~1.2 — so b/r cleanly separates all three (measured L16).
+    const br = b / (r || 1);
+    if (br > 0.75) return 4;              // Dark (blue comparable to/above red)
+    if (br > 0.30) return 5;             // Heart (pink)
+    return 1;                            // Fire (red, blue only mildly lifted)
+  }
+  return 0;                              // red floor -> Water (cyan/blue)
 }
 
 function readBoardFromScreen() {
   const img = captureRaw();
   const cells = [];
+  let anyCandidate = false;
   for (let gy = 0; gy < 5; gy++) {
     const row = [];
-    for (let gx = 0; gx < 6; gx++) row.push(classify(cellStats(img, COLS[gx], ROWS[gy])));
+    for (let gx = 0; gx < 6; gx++) {
+      const c = classify(cellStats(img, COLS[gx], ROWS[gy]));
+      if (c.electric) anyCandidate = true;
+      row.push(c);
+    }
     cells.push(row);
+  }
+  if (anyCandidate) {
+    // Electric anywhere -> capture a burst. Persistence across frames rejects
+    // one-frame neighbor-flare ghosts (P11); the burst also feeds electricBase
+    // the temporal minimum it needs to read the base under glare (L16). ~10
+    // frames converges the min; the arcs move fast so short spacing is fine.
+    // ~18 frames: fewer under-converges the temporal min and pulls Light's
+    // residual down toward Fire's (measured: 10 frames misread a Light shock
+    // as Fire; 18-20 gives Light g/r ~0.45 vs Fire ~0.11).
+    const imgs = [img];
+    for (let k = 0; k < 17; k++) imgs.push(captureRaw());
+    for (let gy = 0; gy < 5; gy++) {
+      for (let gx = 0; gx < 6; gx++) {
+        const statsPerFrame = imgs.map(im => cellStats(im, COLS[gx], ROWS[gy]));
+        const candFrames = statsPerFrame.filter(s => isElectricGlow(s.rgb)).length;
+        let maxDelta = 0;
+        for (let k = 1; k < statsPerFrame.length; k++) {
+          const a = statsPerFrame[k - 1].rgb, b = statsPerFrame[k].rgb;
+          maxDelta = Math.max(maxDelta, Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]));
+        }
+        const meanMin = Math.min(...[0, 1, 2].map(ch => statsPerFrame.reduce((s, f) => s + f.rgb[ch], 0) / statsPerFrame.length));
+        // Electric = persistent glow + flicker (or all channels lifted, which
+        // no enhanced rune shows). Frame-stable glowless cells are normal.
+        if (candFrames >= 2 && (maxDelta > 25 || meanMin > 90)) {
+          const c = { type: 0, thorn: false, electric: true, dist: 0, rgb: statsPerFrame[0].rgb.map(Math.round), darkPct: statsPerFrame[0].darkPct };
+          const base = electricBase(imgs, COLS[gx], ROWS[gy]);
+          if (base === -1) { c.dist = 999; c.unknownBase = true; } // refuse loudly
+          else c.type = base;
+          cells[gy][gx] = c;
+        } else {
+          // not electric: classify from the least-white frame to dodge flares
+          const s = statsPerFrame.reduce((a, b) =>
+            Math.min(a.rgb[1], a.rgb[2]) <= Math.min(b.rgb[1], b.rgb[2]) ? a : b);
+          const c = classify(s);
+          c.electric = false; // transient flare suppressed
+          cells[gy][gx] = c;
+        }
+      }
+    }
   }
   return cells;
 }
@@ -148,15 +288,18 @@ function readBoardFromScreen() {
  * consecutive captures — protects against reading mid-animation frames
  * (clear/skyfall) and against spinning while a dialog covers the board.
  */
-async function waitForStableBoard(timeoutMs = 30000) {
+async function waitForStableBoard(timeoutMs = 30000, allowUnknownShocks = false) {
   const t0 = Date.now();
   let prevKey = null, last = null;
   while (Date.now() - t0 < timeoutMs) {
     const cells = readBoardFromScreen();
     last = cells;
-    const allKnown = cells.every(row => row.every(c => c.dist <= MAX_SIG_DIST));
+    // With a --shock-bases override pending, a bright shock whose base can't
+    // be read is NOT a blocker — the override supplies it after settle.
+    const allKnown = cells.every(row => row.every(c =>
+      c.dist <= MAX_SIG_DIST || (allowUnknownShocks && c.electric && c.unknownBase)));
     if (allKnown) {
-      const key = cells.map(r => r.map(c => c.type + (c.thorn ? '*' : '')).join(',')).join('|');
+      const key = cells.map(r => r.map(cellLabel).join(',')).join('|');
       if (key === prevKey) return cells;
       prevKey = key;
     } else {
@@ -168,7 +311,7 @@ async function waitForStableBoard(timeoutMs = 30000) {
   // variant -> SETTLE_UNKNOWN gives the measured value to add to SIGNATURES)
   if (last) {
     last.forEach((row, gy) => {
-      console.log('[TOS] SETTLE_LAST_ROW' + gy + '=' + row.map(c => TYPE_NAMES[c.type] + (c.thorn ? '*' : '')).join(','));
+      console.log('[TOS] SETTLE_LAST_ROW' + gy + '=' + row.map(cellLabel).join(','));
     });
     const unk = [];
     last.forEach((row, gy) => row.forEach((c, gx) => {
@@ -189,17 +332,18 @@ function readBoardFromFile(file) {
     const tokens = line.split(/[\s,]+/).filter(Boolean);
     if (tokens.length !== 6) throw new Error(`row ${gy} needs 6 cells, got ${tokens.length}`);
     return tokens.map((tok, gx) => {
-      let core = tok.toLowerCase(), thorn = false, flags = 0;
-      while (/[*!x]$/.test(core)) {
+      let core = tok.toLowerCase(), thorn = false, electric = false, flags = 0;
+      while (/[*!x^]$/.test(core)) {
         const s = core.slice(-1);
         if (s === '*') thorn = true;
         if (s === '!') flags |= CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
         if (s === 'x') flags |= CELL_FLAGS.NO_DISSOLVE;
+        if (s === '^') electric = true;
         core = core.slice(0, -1);
       }
       const type = /^[0-5]$/.test(core) ? Number(core) : TYPE_LETTERS.indexOf(core);
       if (type === -1) throw new Error(`bad token "${tok}" at (${gx},${gy})`);
-      return { type, thorn, flags, dist: 0, rgb: null, darkPct: null };
+      return { type, thorn, electric, flags, dist: 0, rgb: null, darkPct: null };
     });
   });
 }
@@ -217,10 +361,26 @@ function inferSealedColumns(cells) {
 
 // ---------- touch execution ----------
 
-function gridPathToScreenPath(gridPath, stepsPerCell = STEPS_PER_CELL) {
+/**
+ * Grid path -> screen points. The held rune TRAILS the finger; at speed it
+ * cuts corners diagonally through cells the finger never visits — through a
+ * shock cell that's an instant interrupt (P11). So dwell (hold position) at
+ * every turn, and longer when the cell neighbors a shock, letting the
+ * trailing rune settle into the cell before the direction changes.
+ */
+function gridPathToScreenPath(gridPath, stepsPerCell = STEPS_PER_CELL, electricCells = []) {
   const centers = gridPath.map(p => ({ x: COLS[p.x], y: ROWS[p.y] }));
+  const nearElectric = p => electricCells.some(e => Math.abs(e.x - p.x) + Math.abs(e.y - p.y) === 1);
   const out = [];
   for (let i = 0; i < centers.length - 1; i++) {
+    let dwell = 0;
+    if (i > 0) {
+      const turned = (centers[i].x - centers[i - 1].x) !== (centers[i + 1].x - centers[i].x)
+        || (centers[i].y - centers[i - 1].y) !== (centers[i + 1].y - centers[i].y);
+      if (turned) dwell = 4;
+      if (nearElectric(gridPath[i])) dwell = Math.max(dwell, 8);
+    }
+    for (let k = 0; k < dwell; k++) out.push({ x: centers[i].x, y: centers[i].y });
     for (let j = 0; j < stepsPerCell; j++) {
       const t = j / stepsPerCell;
       out.push({
@@ -234,25 +394,59 @@ function gridPathToScreenPath(gridPath, stepsPerCell = STEPS_PER_CELL) {
 }
 
 /**
- * Device-paced dispatch: the whole drag is sent upfront as one minitouch
- * script with embedded `w <ms>` waits, executed sequentially ON THE PHONE.
- * PC-side pacing (sleep or deadline loops) is unreliable here — stdin over
- * adb/USB delivers writes in bursts, so the game saw clustered jumps and
- * dropped the rune regardless of our local timing accuracy (LESSONS L9).
+ * Paced stdin dispatch + unconditional release (LESSONS L11/L12/L17).
+ *
+ * CRITICAL (L17): the busy-wait to each deadline MUST yield (setImmediate)
+ * each spin, else libuv never flushes the stdin pipe and adb ships the whole
+ * drag as a ~0.4ms burst -> the game sees an instant jump and drops the rune
+ * (the false "too fast" threshold). Old note below (frame-sampling theory)
+ * was wrong; kept only for history:
+ * The game samples touch per rendered frame: an instant burst works on light
+ * scenes (counter-exact 27/27, 29/29) but drops the rune when heavy boss
+ * effects stretch frame times (4/22 on æ˜Ÿæ–—ç ç›¤Â·ç«). MaaTouch has no `w`
+ * command, so pacing must happen at the sender: deadline-scheduled writes
+ * every stepMs. Jitter/stalls are harmless — a stationary held rune never
+ * drops — the only fatal error is discarding the tail of the script, so:
+ * generous grace after the final write, and afterwards ALWAYS run a one-shot
+ * file-redirected `u 0` script (self-exiting), making a stuck touch
+ * impossible regardless of what happened to the streaming session.
  */
-async function executeTouchPath(screenPath, stepMs = MOVE_INTERVAL_MS) {
-  const p = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App'], { stdio: ['pipe', 'pipe', 'inherit'] });
-  await sleep(1500); // MaaTouch init
-  const script = [`d 0 ${screenPath[0].x} ${screenPath[0].y} 100`, 'c', 'w 100'];
+async function executeTouchPath(screenPath, stepMs) {
+  // Hygiene: a lingering injector from a killed session could still hold or
+  // replay touch state — clear the field before every drag (root available).
+  try { execSync('adb shell su -c "pkill -f MaaTouch"', { stdio: 'pipe' }); } catch { /* none running */ }
+  const p = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  await sleep(1500); // MaaTouch boot
+  const w = s => p.stdin.write(s + '\n');
+  w(`d 0 ${screenPath[0].x} ${screenPath[0].y} 100`); w('c');
+  const t0 = performance.now();
   for (let i = 1; i < screenPath.length; i++) {
-    script.push(`m 0 ${screenPath[i].x} ${screenPath[i].y} 100`, 'c', `w ${stepMs}`);
+    const deadline = t0 + i * stepMs;
+    const lead = deadline - performance.now();
+    if (lead > 20) await sleep(lead - 18);
+    // Busy-wait to the exact deadline, but YIELD each spin (setImmediate) so
+    // libuv flushes the stdin pipe to adb between points. A pure busy-wait
+    // (which happened whenever lead <= 20, i.e. fast speeds) never yields, so
+    // Node batched every write and the device received them as one 0.4ms
+    // burst -> the game saw an instant jump and dropped the rune (L17).
+    while (performance.now() < deadline) { await new Promise(setImmediate); }
+    w(`m 0 ${screenPath[i].x} ${screenPath[i].y} 100`); w('c');
   }
-  script.push('u 0', 'c');
-  p.stdin.write(script.join('\n') + '\n');
-  const nominalMs = 100 + (screenPath.length - 1) * stepMs;
-  await sleep(nominalMs + 800); // device executes the script; wait it out
+  w('u 0'); w('c');
+  const dragMs = performance.now() - t0;
+  await sleep(2000); // grace: only the 2-line tail can be in flight
   p.kill();
-  return nominalMs;
+
+  // Unconditional forced release: one-shot script, runs to EOF and self-exits.
+  const localScript = path.join(__dirname, 'spin_script.txt');
+  fs.writeFileSync(localScript, 'u 0\nc\n');
+  execSync(`adb push "${localScript}" /data/local/tmp/tos_spin.txt`, { stdio: 'pipe' });
+  await new Promise(resolve => {
+    const q = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App < /data/local/tmp/tos_spin.txt'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    const timer = setTimeout(() => { q.kill(); resolve(); }, 8000);
+    q.once('exit', () => { clearTimeout(timer); resolve(); });
+  });
+  return dragMs;
 }
 
 // ---------- recognition check page ----------
@@ -295,8 +489,26 @@ Sealed columns detected: <b>[${sealedCols.join(', ')}]</b></p>
 // ---------- main ----------
 
 function argValue(flag) {
+  // Accept both "--flag value" and "--flag=value" (the latter is what a shell
+  // produces from --start="5,1"). The "=" form is matched first; flag+"="
+  // never collides with a longer flag name (e.g. --first= vs --first-runes=).
+  const eq = process.argv.find(a => a.startsWith(flag + '='));
+  if (eq !== undefined) return eq.slice(flag.length + 1);
   const i = process.argv.indexOf(flag);
   return i === -1 ? null : process.argv[i + 1];
+}
+
+// Parse a "col,row" cell argument (x=column 0-5, y=row 0-4) — the same
+// convention the board grid and [TOS] PATH use. Returns {x,y} or null.
+function argCell(flag) {
+  const raw = argValue(flag);
+  if (raw == null) return null;
+  const parts = String(raw).split(',').map(s => Number(s.trim()));
+  if (parts.length !== 2 || !parts.every(Number.isInteger)
+      || parts[0] < 0 || parts[0] > 5 || parts[1] < 0 || parts[1] > 4) {
+    throw new Error(`${flag} must be "col,row" with col 0-5 and row 0-4 (got "${raw}")`);
+  }
+  return { x: parts[0], y: parts[1] };
 }
 
 function askEnter(msg) {
@@ -321,15 +533,36 @@ async function main() {
 
     const cells = boardFile ? readBoardFromFile(boardFile)
       : (checkOnly || dry) ? readBoardFromScreen()
-      : await waitForStableBoard();
+      : await waitForStableBoard(30000, !!argValue('--shock-bases'));
+
+    // --shock-bases override: bright shocks (esp. Light) defeat pixel base
+    // detection (L15). Supply the base elements for the detected electric
+    // cells (row-major order): one letter applies to all, or a comma list
+    // maps in order. e.g. --shock-bases l  or  --shock-bases w,l,d
+    const shockArg = argValue('--shock-bases');
+    if (shockArg) {
+      const elecCells = [];
+      cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.electric) elecCells.push(c); }));
+      const bases = shockArg.split(',').map(s => s.trim().toLowerCase());
+      elecCells.forEach((c, i) => {
+        const tok = bases.length === 1 ? bases[0] : bases[i];
+        const t = tok !== undefined && (/^[0-5]$/.test(tok) ? Number(tok) : TYPE_LETTERS.indexOf(tok));
+        if (t === -1 || t === undefined || t === false) throw new Error(`--shock-bases: bad/missing element for shock #${i + 1} (need ${elecCells.length} value(s))`);
+        c.type = t; c.dist = 0; c.unknownBase = false;
+      });
+      console.log(`[TOS] SHOCK_BASES_OVERRIDE=${elecCells.length} cell(s) set to [${bases.join(',')}]`);
+    }
 
     const unknowns = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => {
       if (c.dist > MAX_SIG_DIST) unknowns.push(`(${gx},${gy})d=${c.dist.toFixed(0)}rgb=(${c.rgb})dark=${Math.round(c.darkPct * 100)}%`);
     }));
     cells.forEach((row, gy) => {
-      console.log('[TOS] BOARD_ROW' + gy + '=' + row.map(c => TYPE_NAMES[c.type] + (c.thorn ? '*' : '')).join(','));
+      console.log('[TOS] BOARD_ROW' + gy + '=' + row.map(cellLabel).join(','));
     });
+    const elecList = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.electric) elecList.push(`${gx},${gy}`); }));
+    if (elecList.length) console.log('[TOS] ELECTRIC_CELLS=' + elecList.join(' ') + ' (row-major; --shock-bases maps in this order)');
 
     const sealedArg = argValue('--sealed');
     const sealedCols = sealedArg === 'none' ? []
@@ -347,49 +580,186 @@ async function main() {
 
     if (unknowns.length) {
       console.log('[TOS] UNKNOWN_CELLS=' + unknowns.join(';'));
-      throw new Error('unrecognized cells, refusing to spin — run --check or supply --board');
+      const electricUnknown = cells.some(row => row.some(c => c.electric && c.dist > MAX_SIG_DIST));
+      throw new Error(electricUnknown
+        ? 'shock rune base unreadable (bright glow) — pass --shock-bases (e.g. --shock-bases l for all-Light, or w,l,d in row-major order of the ELECTRIC_CELLS above)'
+        : 'unrecognized cells, refusing to spin — run --check or supply --board');
     }
 
     const board = new Board();
     board.fromArray(cells.map(row => row.map(c => c.type)));
-    const flagGrid = cells.map(row => row.map(c => c.flags ?? 0));
+    // Electric runes (P11): cannot be picked up or dragged through (interrupt
+    // the spin) but DO dissolve with their base element — and clearing them is
+    // top priority (they block attacking until dissolved).
+    const priorityCells = [];
+    const flagGrid = cells.map((row, gy) => row.map((c, gx) => {
+      let f = c.flags ?? 0;
+      if (c.electric) {
+        f |= CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
+        priorityCells.push({ x: gx, y: gy });
+      }
+      return f;
+    }));
     const hasFlags = flagGrid.some(row => row.some(v => v !== 0));
     if (hasFlags) console.log('[TOS] CELL_FLAGS_ROWS=' + flagGrid.map(r => r.join('')).join('|'));
-    const minFirstArg = Number(argValue('--first-min-combos') ?? 0);
-    const solver = new DoraSolver(board, {
-      beamWidth: Number(argValue('--beam') ?? 200),
-      maxPath: Number(argValue('--max-path') ?? 30),
-      sealedColumns: sealedCols,
-      flags: hasFlags ? flagGrid : null, minFirstCombos: minFirstArg,
-    });
+
+    // --start / --end pin the drag's begin/end cell (col,row). Orthogonal to
+    // every other knob (sealed columns, first-combos/-runes, priority) — they
+    // just restrict the beam's seed cells and which states may be the answer.
+    const startCell = argCell('--start');
+    const endCell = argCell('--end');
+    if (startCell && (flagGrid[startCell.y][startCell.x] & (CELL_FLAGS.NO_PICKUP))) {
+      console.log(`[TOS] ABORT=start-unpickable start=${startCell.x},${startCell.y} is electric/frozen (NO_PICKUP) — the game can't lift it; pick another --start (no touch sent)`);
+      return;
+    }
+    const startCells = startCell ? [startCell] : null;
+    if (startCell || endCell) {
+      console.log(`[TOS] PIN=start:${startCell ? `${startCell.x},${startCell.y}` : 'any'} end:${endCell ? `${endCell.x},${endCell.y}` : 'any'}`);
+    }
+    // --first-combos N = EXACTLY N; --first-combos N+ = at least N;
+    // --first-combos max = highest achievable. --first-min-combos N stays
+    // as a backward-compatible alias for N+.
+    const rawExactFlag = argValue('--first-combos');
+    const rawTarget = rawExactFlag ?? argValue('--first-min-combos');
+    const maxMode = rawTarget === 'max';
+    const exactMode = rawExactFlag !== null && !maxMode && !String(rawExactFlag).endsWith('+');
+    const minFirstArg = maxMode ? 0 : Number(String(rawTarget ?? 0).replace(/\+$/, ''));
+    // --first-runes N = EXACTLY N runes in the first wave (楊玉環 "NUM N");
+    // --first-runes N+ = at least N.
+    const rawRunes = argValue('--first-runes');
+    const exactRunesMode = rawRunes !== null && !String(rawRunes).endsWith('+');
+    const minFirstRunes = Number(String(rawRunes ?? 0).replace(/\+$/, ''));
     const t0 = Date.now();
-    const sol = solver.solve();
-    console.log(`[TOS] SOLVE ms=${Date.now() - t0} start=${sol.startX},${sol.startY} moves=${sol.moves.length} first=${sol.firstCombos} combos=${sol.comboCount} chains=${sol.chains} weight=${sol.score}`);
+    let sol, engine;
+
+    if (minFirstRunes > 0) {
+      sol = new DoraSolver(board, {
+        beamWidth: Number(argValue('--beam') ?? 200),
+        maxPath: Number(argValue('--max-path') ?? 30),
+        sealedColumns: sealedCols,
+        flags: hasFlags ? flagGrid : null, priorityCells,
+        minFirstRunes, exactFirstRunes: exactRunesMode,
+        startCells, endCell,
+      }).solve();
+      engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
+    } else if (maxMode) {
+      // Find the highest achievable first-wave count (bound -> planner -> baseline)
+      const res = solveMaxFirstCombos(board, {
+        sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, priorityCells,
+        beamWidth: Number(argValue('--beam') ?? 200),
+        maxPath: Number(argValue('--max-path') ?? 30),
+        plannerBeamWidth: Math.max(300, Number(argValue('--beam') ?? 0)),
+        plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
+        startCells, endCell,
+      });
+      sol = res.solution;
+      engine = `MaxFirstCombos(achieved=${res.achieved}/bound=${res.bound})`;
+    } else {
+      sol = new DoraSolver(board, {
+        beamWidth: Number(argValue('--beam') ?? 200),
+        maxPath: Number(argValue('--max-path') ?? 30),
+        sealedColumns: sealedCols,
+        flags: hasFlags ? flagGrid : null, priorityCells,
+        minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
+        startCells, endCell,
+      }).solve();
+      engine = 'DoraSolver';
+    }
+
+    const missesTarget = () => exactMode ? sol.firstCombos !== minFirstArg : sol.firstCombos < minFirstArg;
+
+    // Guarantee escalation: if the beam search misses the first-combo target,
+    // the two-phase planner either constructs it or proves it impossible.
+    if (!maxMode && minFirstRunes === 0 && minFirstArg > 0 && missesTarget()) {
+      const plannerBeam = Math.max(300, Number(argValue('--beam') ?? 0));
+      const plannerMaxPath = Math.max(60, Number(argValue('--max-path') ?? 0));
+      const planner = new TargetPlanner(board, {
+        sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
+        minFirstCombos: minFirstArg, exact: exactMode,
+        beamWidth: plannerBeam, maxPath: plannerMaxPath,
+        startCells, endCell,
+      });
+      const planned = planner.solve();
+      if (planned.solution) {
+        sol = planned.solution;
+        engine = `TargetPlanner(target#${planned.targetsTried})`;
+      } else {
+        console.log('[TOS] PLANNER=failed reason=' + planned.reason + (planned.reason === 'routing-failed'
+          ? ` (targets exist; tried beam=${plannerBeam} maxPath=${plannerMaxPath} targets=${planned.targetsTried}; retry with --beam ${plannerBeam * 2} and/or --max-path ${plannerMaxPath + 30})`
+          : ' (demand provably impossible on this board)'));
+      }
+    }
+
+    console.log(`[TOS] SOLVE ms=${Date.now() - t0} engine=${engine} start=${sol.startX},${sol.startY} moves=${sol.moves.length} first=${sol.firstCombos} firstRunes=${sol.firstRunes} combos=${sol.comboCount} chains=${sol.chains} weight=${sol.score}`);
     console.log('[TOS] PATH=' + sol.path.map(p => `${p.x},${p.y}`).join(' '));
 
-    const minFirstCombos = Number(argValue('--first-min-combos') ?? 0);
-    if (minFirstCombos > 0 && sol.firstCombos < minFirstCombos) {
-      console.log(`[TOS] ABORT=first-min-combos first=${sol.firstCombos} required=${minFirstCombos} (no touch sent)`);
+    // Start/end pinning is a hard constraint: if the solver couldn't honor it
+    // (end unreachable within --max-path, or nothing to seed), abort rather
+    // than spin a path that ignores the pins. Checked before the first-wave
+    // aborts so an impossible pin is reported as the root cause.
+    if (startCell || endCell) {
+      const first = sol.path[0], last = sol.path[sol.path.length - 1];
+      const startOk = !startCell || (first.x === startCell.x && first.y === startCell.y);
+      const endOk = !endCell || (last.x === endCell.x && last.y === endCell.y);
+      if (sol.moves.length === 0 || !startOk || !endOk) {
+        console.log(`[TOS] ABORT=start-end required start=${startCell ? `${startCell.x},${startCell.y}` : 'any'} end=${endCell ? `${endCell.x},${endCell.y}` : 'any'} but got start=${first.x},${first.y} end=${last.x},${last.y} moves=${sol.moves.length} — unreachable within --max-path ${Number(argValue('--max-path') ?? 30)} (raise --max-path, or relax --start/--end); no touch sent`);
+        return;
+      }
+    }
+
+    if (minFirstRunes > 0 && (exactRunesMode ? sol.firstRunes !== minFirstRunes : sol.firstRunes < minFirstRunes)) {
+      console.log(`[TOS] ABORT=first-runes firstRunes=${sol.firstRunes} required${exactRunesMode ? '=exactly ' : '>='}${minFirstRunes} (no touch sent; try --beam 1600 --max-path 60)`);
+      return;
+    }
+    if (!maxMode && minFirstRunes === 0 && minFirstArg > 0 && missesTarget()) {
+      console.log(`[TOS] ABORT=first-combos first=${sol.firstCombos} required=${exactMode ? 'exactly ' : '>='}${minFirstArg} (no touch sent)`);
       return;
     }
 
     if (dry) { console.log('[TOS] DRY_RUN=1 (no touch sent)'); return; }
     if (process.argv.includes('--confirm')) {
       await askEnter('[TOS] CONFIRM board+path above, press Enter to spin (Ctrl+C aborts)... ');
+      // Staleness guard: the game may have moved on (attack animations, wave
+      // transition) while waiting at the prompt — spinning a stale plan drags
+      // on a board that no longer exists. Re-capture and re-solve on mismatch.
+      if (!boardFile) {
+        const fresh = readBoardFromScreen();
+        const same = fresh.every((row, gy) => row.every((c, gx) => cellLabel(c) === cellLabel(cells[gy][gx])));
+        if (!same) {
+          console.log('[TOS] BOARD_CHANGED=true (board moved while waiting at confirm) — re-solving');
+          round--;
+          continue;
+        }
+      }
     }
 
     const stepsPerCell = Number(argValue('--steps-per-cell') ?? STEPS_PER_CELL);
-    const stepMs = Number(argValue('--step-ms') ?? MOVE_INTERVAL_MS);
-    const screenPath = gridPathToScreenPath(sol.path, stepsPerCell);
+    // Speed: --move-ms sets ms per CELL move directly (fine, decimal ok — the
+    // game's drop threshold sits at a sharp cell-traversal time, ~205ms on the
+    // shock stage, that whole-number --step-ms can't straddle). --step-ms sets
+    // per touch-point time (× steps-per-cell = per move). --move-ms wins.
+    const moveMsArg = argValue('--move-ms');
+    const stepMs = moveMsArg != null ? Number(moveMsArg) / stepsPerCell : Number(argValue('--step-ms') ?? STEP_MS);
+    const screenPath = gridPathToScreenPath(sol.path, stepsPerCell, priorityCells);
     const dragMs = await executeTouchPath(screenPath, stepMs);
-    console.log(`[TOS] SPIN=done points=${screenPath.length} dragMs=${Math.round(dragMs)} msPerMove=${Math.round(dragMs / sol.moves.length)}`);
+    console.log(`[TOS] SPIN=done points=${screenPath.length} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} (moveMs excludes corner dwells)`);
+
+    // Effect check: a spin should change the board (matches or at least the
+    // drag's swaps). Identical board = input was ignored (dialog, enemy
+    // phase, defeat screen) — say so instead of silently moving on.
+    if (!boardFile) {
+      await sleep(1200);
+      const after = readBoardFromScreen();
+      const unchanged = after.every((row, gy) => row.every((c, gx) => cellLabel(c) === cellLabel(cells[gy][gx])));
+      if (unchanged) console.log('[TOS] NO_EFFECT=true (board identical after spin — input blocked? dialog/enemy phase/defeat screen)');
+    }
   }
 
   if (!dry && !checkOnly && !process.argv.includes('--no-final')) {
     console.log('[TOS] WAIT=post-spin settle (cascades/skyfall/attack animations); pass --no-final to skip this report');
-    const fin = await waitForStableBoard();
+    const fin = await waitForStableBoard(30000, !!argValue('--shock-bases'));
     fin.forEach((row, gy) => {
-      console.log('[TOS] FINAL_ROW' + gy + '=' + row.map(c => TYPE_NAMES[c.type] + (c.thorn ? '*' : '')).join(','));
+      console.log('[TOS] FINAL_ROW' + gy + '=' + row.map(cellLabel).join(','));
     });
   }
 }

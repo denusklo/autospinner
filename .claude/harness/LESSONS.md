@@ -72,3 +72,52 @@
 - Lesson: next time timing matters across a transport, embed the timing IN the payload (minitouch `w <ms>` waits, whole script sent upfront) instead of pacing the sender; and after killing a touch-injection process, assume leftover events may still fire — re-verify the counter baseline before the next measurement.
 - Evidence: device-paced runs counter-exact 29/29 @80ms and 27/27 @50ms (468→439→412) vs PC-paced 5/28; session 2026-07-07.
 - Affected files: PROJECT-FACTS P8 rewritten (device-paced dispatch is now the hard rule).
+
+## L11 2026-07-07 MaaTouch has no `w` wait — the "device-paced timing" of L10 never existed (and the kill-timer caused stuck touches)
+- Symptom: rune occasionally stayed held after a finished spin. Investigation: a script of `w 100`x20 (2s nominal) finished in ~0ms; `w 2000` between down/up executed instantly (process exit 264ms).
+- Root cause: MaaTouch v1.1.0 ignores `w` — every "paced" script actually injected contiguously at driver speed (the game accepts this; that's why counters matched exactly). The stuck touch was the p.kill() timer racing MaaTouch's boot: killing the adb session discards unconsumed script including the final `u 0`. Also: stdin EOF kills the remote mid-script (102ms for a 2s script), so streaming+closing is equally unsafe.
+- Lesson: next time timing/protocol behavior is assumed, MEASURE it before building on it (a wait that doesn't wait is silent); for run-to-completion semantics over adb, redirect stdin from a device FILE and treat process self-exit as the completion proof — never a kill timer, never stdin EOF.
+- Evidence: maat-w-test.js exit 264ms code=137; EOF test exit 102ms; L9/L10's "speed limit" narrative retired.
+- Affected files: PROJECT-FACTS P8 rewritten again; phone/autospin.js executeTouchPath rewritten (file-redirect + self-exit + rescue-release).
+
+## L12 2026-07-07 Truncated drags were ELECTRIC-RUNE interrupts, not touch timing — and flickering rune states need multi-frame recognition
+- Symptom: in 星斗珠盤·火, every drag registered only 0-4 of 12-29 planned moves across three different dispatch designs (instant, PC-paced, file-scripted), spawning two wrong theories (L9 speed limits, frame sampling). Meanwhile a 2-move spin registered ZERO.
+- Root cause: the stage's electric runes interrupt the spin when touched or passed through, and their flickering white-cyan glow classified as "Water"/"enhanced Water", hiding them from recognition. Every truncation point mapped exactly onto a misread electric cell — including the 0-move run which STARTED on one. Additionally, single-frame hue voting misidentified the base element ~40% of frames (arcs cover all sub-patches in some frames).
+- Lesson: next time drags truncate at consistent counts, map the truncation cells against the recognized board BEFORE touching dispatch code — an interrupting rune state is one misread away; and for any animated/flickering rune state, pool recognition evidence across multiple frames instead of trusting one capture.
+- Evidence: truncation analysis (paths hit "Water" at exactly moves 4/3/0); flicker probe (wood cells read pure blue in 2 of 5 frames); post-fix live spin 29/29 moves + first-wave electric clear + 161M damage, 2026-07-07.
+- Affected files: PROJECT-FACTS P11 added; P8's pacing rationale corrected in code comments.
+
+## L13 2026-07-07 Arc-flare bleed created GHOST electric detections one cell off — the drag then hit the real, unmarked shock
+- Symptom: User watched the hand grab/pass shock runes although every planned path avoided all recognized electric cells. Consecutive runs "saw" the shock at (3,1), then (4,1), then (4,2) — interpreted first as the shock moving (it never moves except gravity/touch — User stated).
+- Root cause: electric arcs flare BEYOND the cell border; a single-frame whiteness test sometimes fires on the neighbor while the true shock's own center reads dim that frame. Recognition then marked the neighbor, left the real shock unmarked, and the solver routed straight through it. 8-frame probe: real shocks are white ~8/8 frames; ghosts are 1-frame transients.
+- Lesson: next time a rune STATE is detected from glow/animation, require PERSISTENCE across frames (white in >=2 of 3), not presence in one — union alone imports ghosts, single-frame alone mislocates. And when "the obstacle moved" contradicts the game's rules, suspect the detector before inventing new mechanics.
+- Evidence: multi-shock-probe.js — 8/8 frames electric={(4,2),(1,3),(2,3)}, (3,1)=(30,178,39) pure Wood every frame; user runs 1-2 had paths crossing the unmarked (4,2) 3x/2x, 2026-07-07.
+- Affected files: PROJECT-FACTS P11 updated (persistence rule, relaxed thresholds g>215/b>205).
+
+## L14 2026-07-08 Dark-type shocks (magenta arcs) invisible to the green-based whiteness rule — needed element-agnostic detection
+- Symptom: dark shock runes at (4,0)/(4,2) read as Heart; board was heart-heavy and the plan built on a wrong board (user caught it before Enter).
+- Root cause: electric detection required high GREEN (assumed cyan arcs). Dark shocks glow MAGENTA-white (r+b high, green swings 135-207), failing the g>215 test. Element-specific rule doesn't generalize across shock base colors.
+- Lesson: next time detecting an animated overlay across variants, key on the INVARIANT (electric = ≥2 channels near-white + frame flicker >25, since arcs of any hue light ≥2 channels and all normal/enhanced runes are frame-stable ≤15) rather than one color family. The flicker test also cleanly rejects the enhanced-Dark near-miss (225,77,237) that passes the ≥2-channel candidate rule.
+- Evidence: dark-shock-probe.js — (4,0)/(4,2) swing (221,135,254)↔(243,207,254), frame delta 50-59; all other cells delta 0-15; darkbase-probe darkest patches (50,20,82)(79,37,148) → purple family. Post-fix dry run: both read Dark^, path avoids both, 2026-07-08.
+- Affected files: PROJECT-FACTS P11 rewritten (element-agnostic candidate + flicker confirmation + purple-family base rule).
+
+## L15 2026-07-08 Light-type shock bases are pixel-unreadable (glare); use frame-CONSISTENCY to refuse, plus a manual override
+- Symptom: 3 Light shocks read as Water/Dark/Fire across successive captures (all wrong; all are Light). Adding a yellow-detection rule made it confidently wrong instead of refusing.
+- Root cause: a Light shock's white-cyan-yellow glare is so bright the darkest sub-patches still saturate; the residual base tint flips family frame-to-frame. No single-capture color rule can separate "wood shock" from "light shock that looks woodish this frame."
+- Lesson: when a signal is intrinsically unstable, the reliable discriminator is CONSISTENCY not a better threshold — classify each frame independently and refuse (-1) unless frames agree (verified-stable Wood/Water/Dark agree every frame; Light/Fire flip). Pair auto-detect with a manual override for the unreadable cases rather than chasing a perfect heuristic (R4: stopped after the yellow-rule strike). Also: overrides applied AFTER waitForStableBoard must be tolerated BY it (allowUnknownShocks) or live mode dead-ends on the refuse.
+- Evidence: light-shock-probe two runs gave blue-dominant then yellow-dominant for the same cell; --shock-bases l live spin counter 338→316 (exact 22 moves), 2026-07-08.
+- Affected files: phone/autospin.js (per-frame electricBase + --shock-bases + waitForStableBoard allowUnknownShocks); PROJECT-FACTS P11.
+
+## L16 2026-07-08 TEMPORAL MINIMUM cracks the "unreadable" bright shock — arcs are additive, so min-over-frames reveals the base
+- Symptom: L15 concluded Light shock bases were intrinsically unreadable (refuse + manual override). User pushed: "can we extract the signature? take as many screenshots as you want."
+- Root cause of earlier failure: single/few-frame reads see base+arc (additive glare) which flips the apparent hue. The base is invariant; the glare is what varies.
+- Lesson: for an ADDITIVE transient overlay (glow, glare, specular flicker), take the per-pixel TEMPORAL MINIMUM across many frames — it strips the overlay and leaves the base, where a few frames' average or consistency-vote cannot. Then subtract the lowest channel to remove any residual white floor and read the pure hue. This turned all 6 shock bases from "refuse" into reliable auto-detection. Frame count matters: min must converge (10 too few → Light residual g/r sinks toward Fire; ~18-20 stable).
+- Evidence: temporal-min bases separated all 6 elements cleanly (Wood(22,121,16)…Light(102,61,1)…); Light shocks residual g/r~0.45 vs Fire 0.11; live auto both shocks Light^ weight 91, 2026-07-08.
+- Affected files: phone/autospin.js electricBase rewritten (temporal min + hue tree), 18-frame burst; PROJECT-FACTS P11.
+
+## L17 2026-07-08 "Too fast drops the rune" was a stdin-flush bug, not a game speed limit — busy-wait starved libuv so events shipped as one burst
+- Symptom: --move-ms 200 (20ms/pt) "untraceable" drop; 210 (21ms/pt) worked. Looked like a sharp game threshold at ~205ms/move.
+- Root cause: executeTouchPath busy-waited to each deadline. When per-point lead <= 20ms (i.e. fast speeds) the `if(lead>20) sleep` branch was skipped, so the loop NEVER awaited — libuv never flushed the stdin pipe, Node batched every write, and adb delivered them to the device as a 0.4ms burst (measured via dumpsys RecentQueue). The game saw one instant jump and dropped the rune. At 21ms the sleep branch fired, yielding/flushing per point (device spacing 19ms).
+- Lesson: a CPU busy-wait in an async pipeline silently blocks I/O flushing — if you must spin to a deadline, YIELD each spin (`await new Promise(setImmediate)`) so pending writes drain. Verify transport timing at the DESTINATION (dumpsys event ages), not just the sender's write timestamps — they diverged completely (PC 20ms, device 0.4ms).
+- Evidence: timing-inspect.js — stepMs=20 device spacing 0.4ms (bug) → 17.9ms (after setImmediate yield); PC-side spacing 20.0ms in both.
+- Affected files: phone/autospin.js executeTouchPath busy-wait now yields via setImmediate; PROJECT-FACTS P8.

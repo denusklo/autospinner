@@ -34,7 +34,7 @@ See the `CLAUDE.md` file map (single source of truth, not repeated here). Load-o
 
 Environment: Node v20.19.6. `algorithm.js` has CommonJS exports: `Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver`. [Verification] actual run, 2026-07-07
 
-**Standard regression command (the concrete form of R2)**: run `node verify.js` in the repo root — 22 checks (simulator unit tests + DoraSolver solution legality + old/new A/B + smoke regression); exit 0 = all pass. Must run after changing algorithm.js; when adding behavior, add a matching check to verify.js. [Verification] actual run 22/22 PASS, 2026-07-07
+**Standard regression command (the concrete form of R2)**: run `node verify.js` in the repo root — 38 checks (simulator unit tests + DoraSolver solution legality + old/new A/B + sealed columns/CELL_FLAGS constraints + minFirstCombos steering + smoke regression); exit 0 = all pass. Must run after changing algorithm.js; when adding behavior, add a matching check to verify.js. [Verification] actual run 38/38 PASS, 2026-07-07
 
 Supplementary smoke test (outputs 1 combo / score 55):
 
@@ -71,3 +71,21 @@ Rule: when delivering such changes, you must attach "a ≤3-step verification gu
 ### 4c. Not Yet Built (future upgrade direction, see 05-HANDOVER-LETTER)
 
 A fully automated e2e loop: Playwright driving the real simulator page + `--load-extension`. Until it is built, the final acceptor for 4b-type changes is always the User.
+
+## 5. Phone (Android, Real Game) Channel Facts — new subproject `phone/`
+
+Target: the real TOS game (Madhead) on the User's rooted phone, driven over USB adb. Demo account only (User stated, 2026-07-07) — automation violates the game's ToS; never run against a real account.
+
+| # | Fact | Verification |
+|---|---|---|
+| P1 | Device: Xiaomi Mi 9T Pro (raphael), Android 10 / SDK 29, arm64-v8a, 1080×2340 @440dpi, Magisk root (`su -c id` → uid=0) | adb getprop/wm size actual run, 2026-07-07 |
+| P2 | Touch injection: MaaTouch v1.1.0 at `/data/local/tmp/maatouch`; launch `adb shell CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App`; minitouch protocol on stdin; header `^ 10 1080 2340 255` → coords are 1:1 screen px | actual run, 2026-07-07 |
+| P3 | Board geometry (this device): 180px cells; column centers x=90+180·gx, row centers y=1330+180·gy | one-cell drag swapped exactly the targeted runes + 30/30 recognition, 2026-07-07 |
+| P4 | Capture: `adb shell screencap /sdcard/f.raw` + `adb pull` → RGBA8888, 16-byte header on this device (w,h,fmt,+4); avoids PNG decode entirely. Never redirect adb binary output through PowerShell `>` (LESSONS L7) | actual run w=1080 h=2340 fmt=1, 2026-07-07 |
+| P5 | Real-game color signatures (110×110 patch average at cell center): Water(68,146,202) Fire(213,36,16) Wood(30,178,39) Light(194,144,11) Dark(180,33,208) Heart(229,92,168); thorn-overlay variants ≈0.55× dimmed with 36–38% near-black pixels (clean runes 0–7%) — see `phone/autospin.js` SIGNATURES. Rendering is frame-stable (identical values across cells). Also measured: Light+thorn(118,98,52), Water+thorn(70,98,119) ⚠️ only ~60 from Dark+thorn — with one absent the other silently wins, both entries are load-bearing. **Enhanced** (white-sparkle) measured: Water(118,193,239), Fire(246,101,67), Light(241,188,51), Dark(225,77,237). Missing variants (enhanced Wood/Heart) are intentionally ABSENT from SIGNATURES so the unknown-guard refuses and prints measured rgb/dark% — never extrapolate (LESSONS L8) | live sampling + 30/30 matched visual ground truth + **User confirmed via check.html overlay** (this stage/theme), 2026-07-07 |
+| P6 | Thorn(black-web) overlay appears only when the User activates a special card function; it marks **sealed columns** (leftmost + rightmost while active): runes there **cannot dissolve but can be dragged/dragged-through**. The state is positional, not per-rune — post-skyfall runes landing in those columns show the overlay too | User stated + observed on 3 screenshots (thorns exclusively in cols 0/5, incl. after skyfall), 2026-07-07 |
+| P9 | Board-effect constraint system in `algorithm.js`: `CELL_FLAGS` (exported) = per-cell bitmask grid `flags[y][x]` — NO_DISSOLVE(1) excluded from matching, NO_PICKUP(2) can't be the held rune, NO_SWAP(4) drag can't enter. Flags are POSITIONAL (stay with the cell, matching P6's sealed-column observation). `BoardSimulator.resolve(board, {sealedColumns, flags})` / `DoraSolver({sealedColumns, flags})`; the two compose. `phone/autospin.js` auto-infers sealed columns (≥3 thorned cells in a column; override `--sealed 0,5`/`none`); board-file suffixes `*`=thorn `!`=frozen(2\|4) `x`=no-dissolve(1). Modeling of "sealed cells break runs" is UNVERIFIED against the real game | node verify.js 34/34 PASS (S1-S6), 2026-07-07 |
+| P7 | Objective execution check: the in-battle move counter decrements by exactly the number of cell moves executed (499→481 for an 18-move path) — use it to verify a path ran to completion without needing mid-animation screenshots | screenshots before/after spin, 2026-07-07 |
+| P8 | Drag dispatch MUST be device-paced: send the whole path as one minitouch script with `w <ms>` waits executed on the phone. PC-side pacing (sleep loops AND deadline scheduling) fails — adb/USB delivers writes in bursts, the game sees clustered jumps, drops the rune after 3-5 moves, and **undelivered events replay later as phantom moves corrupting the P7 counter check**. Device-paced verified EXACT: 29/29 moves @ 80ms/move, 27/27 @ 50ms/move (10 points/cell, 18px steps). Faster than 50ms/move untested. `--step-ms`/`--steps-per-cell` control speed; after ANY speed change re-verify via P7 counter check. Real game HAS skyfall — combo counts on screen will exceed BoardSimulator predictions (F11 models no skyfall); post-spin board comparison is NOT a valid check on this channel | counter screenshots 468→439 (29 moves), 439→412 (27 moves), 2026-07-07 |
+
+Unlike channel 4b, this channel is fully self-verifiable by the model (adb = both eyes and hands); the User is only needed to put the game on a board screen.

@@ -7,11 +7,12 @@ Chrome MV3 extension: on the orb-spinning simulator <https://louisalflame.github
 | File | Responsibility | Notes |
 |---|---|---|
 | `algorithm.js` | Pure logic: Board / all Solvers / `BoardSimulator` (exact simulation) / `DoraSolver` (primary engine) | Change this → must run `node verify.js` (hard rule R2) |
-| `verify.js` | Standard regression suite (22 checks, runs directly under Node) | When adding algorithm.js behavior, add a matching check |
+| `verify.js` | Standard regression suite (38 checks, runs directly under Node) | When adding algorithm.js behavior, add a matching check |
 | `content.js` | Browser side: canvas rune reading, mouse event simulation, control panel | Change this → cannot be verified locally, must follow the structured log contract |
 | `popup.html` / `popup.js` | Extension popup UI | Low-risk area |
 | `manifest.json` | MV3 config; content_scripts order is algorithm.js → content.js | Order must not be reversed |
 | `test-algorithm.html` | Manual browser test page | For User manual testing only, not automated verification |
+| `phone/autospin.js` | Real Android game: adb capture → recognition → DoraSolver → MaaTouch drag | Facts in PROJECT-FACTS section 5; `--dry` solves without touching; demo account only |
 | `docs/autodora-algorithm-spec.md` | Implementation reference for new solvers (full DoraHeart V2 beam search spec) | ⚠️ The spec's rune encoding is **different** from this project (Water/Fire swapped); read PROJECT-FACTS F9 before implementing |
 
 ## Hard Rules (violating any one = this work is not acceptable)

@@ -431,6 +431,71 @@ const sp7tp = new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstCombo
 check('SP7 planner never routes from a non-pinned start',
   sp7tp.reason !== 'ok' || (sp7tp.solution.startX === 1 && sp7tp.solution.startY === 4), true);
 
+// --- Clear-all-of-type via coverage planner (PROJECT-FACTS P14) ---
+// DoraSolver can't gather a scattered scarce type into its dissolving group(s);
+// TargetPlanner constructs coverage lines and routes them.
+
+// CA1: partition of a type's count into dissolving-line lengths (each 3..6)
+check('CA1 partitionCount(4)', TargetPlanner.partitionCount(4), [4]);
+check('CA1 partitionCount(5)', TargetPlanner.partitionCount(5), [5]);
+check('CA1 partitionCount(6)', TargetPlanner.partitionCount(6), [6]);
+check('CA1 partitionCount(7)', TargetPlanner.partitionCount(7), [3, 4]);
+const p9 = TargetPlanner.partitionCount(9);
+check('CA1 partitionCount(9) valid (parts 3..6 summing to 9)',
+  p9.reduce((s, n) => s + n, 0) === 9 && p9.every(n => n >= 3 && n <= 6), true);
+
+// CA2: 4 Darks (3 in col 0 + 1 at (1,3)) — planner clears ALL four and the
+// solution is well-formed. No minFirstCombos passed, so this also guards the
+// clearAllComboFloor fix (a clear-all-only request must NOT be gated to >=5
+// combos and falsely reported routing-failed).
+const covBoard = mk([[4,0,1,2,3,5],[4,1,2,3,5,0],[4,2,3,5,0,1],[0,4,5,0,1,2],[1,2,3,0,5,1]]);
+const covRes = new TargetPlanner(covBoard, {clearTypes: [4], beamWidth: 800, maxPath: 40}).solve();
+check('CA2 clear-all planner returns a solution', covRes.reason, 'ok');
+check('CA2 all 4 Darks cleared first wave',
+  BoardSimulator.resolve(covRes.solution.board).firstClearedByType[4], 4);
+let covWf = covRes.solution.path[0].x === covRes.solution.startX && covRes.solution.path[0].y === covRes.solution.startY
+  && covRes.solution.moves.length === covRes.solution.path.length - 1;
+for (let j = 1; j < covRes.solution.path.length; j++) {
+  const d = Math.abs(covRes.solution.path[j].x - covRes.solution.path[j - 1].x)
+    + Math.abs(covRes.solution.path[j].y - covRes.solution.path[j - 1].y);
+  if (d !== 1) covWf = false;
+}
+check('CA2 clear-all solution well-formed', covWf, true);
+
+// CA3: coverage-planner combos are honest against an independent resolve
+check('CA3 planner combo count is honest',
+  BoardSimulator.resolve(covRes.solution.board).totalCombos, covRes.solution.comboCount);
+
+// --- Fire-route: drag may not re-enter a cell left within the last N moves ---
+// Invariant: standing on path[k-1] about to step to path[k], the fired window
+// is the last N DEPARTED cells (path[(k-1)-N .. k-2]); the target must be clear.
+function fireRouteInvariant(path, fireLen) {
+  for (let k = 1; k < path.length; k++) {
+    const B = path[k];
+    for (let j = Math.max(0, (k - 1) - fireLen); j <= k - 2; j++) {
+      if (path[j].x === B.x && path[j].y === B.y) return false;
+    }
+  }
+  return true;
+}
+for (const fl of [6, 3]) {
+  const frSol = new DoraSolver(mk(BOARDS[2]), {beamWidth: 400, maxPath: 30, fireRoute: fl}).solve();
+  check(`FR fire-route ${fl}: path never re-enters a burning cell`, fireRouteInvariant(frSol.path, fl), true);
+  check(`FR fire-route ${fl}: still finds combos & stays honest`,
+    frSol.comboCount > 0 && BoardSimulator.resolve(frSol.board).totalCombos === frSol.comboCount, true);
+}
+// fireBlocked helper exposed by the module (unit): last N *departed* cells block
+check('FR immediate previous cell is blocked (backtrack subsumed)',
+  new DoraSolver(mk(BOARDS[0]), {beamWidth: 50, maxPath: 6, fireRoute: 2}).solve().path.every((p, i, a) =>
+    i < 2 || !(p.x === a[i - 2].x && p.y === a[i - 2].y)), true);
+
+// FR + clear-all compose: 4 Darks cleared AND the path stays fire-legal
+const frClear = new DoraSolver(mk([[4,0,1,2,3,5],[4,1,2,3,5,0],[4,2,3,5,0,1],[0,4,5,0,1,2],[1,2,3,0,5,1]]),
+  {clearTypes: [4], beamWidth: 1000, maxPath: 40, fireRoute: 6}).solve();
+check('FR + clear-all: all Darks cleared',
+  BoardSimulator.resolve(frClear.board).firstClearedByType[4], 4);
+check('FR + clear-all: path fire-legal', fireRouteInvariant(frClear.path, 6), true);
+
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---
 const smoke = mk([[0,0,0,1,2,3],[1,2,3,4,5,0],[2,3,4,5,0,1],[3,4,5,0,1,2],[4,5,0,1,2,3]]);
 check('REG MatchFinder smoke score', new MatchFinder(smoke).calculateScore().score, 55);

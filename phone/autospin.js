@@ -63,6 +63,12 @@
  *                                             # compose with every other flag below.
  *                                             # If the end can't be reached within
  *                                             # --max-path the run aborts (no touch).
+ *   node phone/autospin.js --fire-route       # drag leaves a fire trail: the last 6 cells
+ *                                             # the finger LEFT stay on fire and cannot be
+ *                                             # re-entered (self-avoiding within a sliding
+ *                                             # window; oldest releases as you advance).
+ *                                             # --fire-route N sets the trail length. Composes
+ *                                             # with all other flags; may reduce combos.
  *   node phone/autospin.js --sealed 0,5       # force sealed columns; --sealed none disables
  *   node phone/autospin.js --shock-bases l    # set electric-rune base element(s) when the
  *                                             # bright glow defeats auto-detection: one letter
@@ -651,6 +657,16 @@ async function main() {
     if (startCell || endCell) {
       console.log(`[TOS] PIN=start:${startCell ? `${startCell.x},${startCell.y}` : 'any'} end:${endCell ? `${endCell.x},${endCell.y}` : 'any'}`);
     }
+    // --fire-route [N]: the drag leaves a fire trail; the last N cells the
+    // finger left stay on fire and can't be re-entered (self-avoiding within a
+    // sliding window; oldest releases as you advance). Bare flag = 6; --fire-route N
+    // (or --fire-route=N) sets the length.
+    let fireRoute = 0;
+    if (process.argv.some(a => a === '--fire-route' || a.startsWith('--fire-route='))) {
+      const n = Number(argValue('--fire-route'));
+      fireRoute = (Number.isInteger(n) && n > 0) ? n : 6;
+      console.log(`[TOS] FIRE_ROUTE=${fireRoute} (last ${fireRoute} cells left behind stay on fire; no re-entry)`);
+    }
     // --first-combos N = EXACTLY N; --first-combos N+ = at least N;
     // --first-combos max = highest achievable. --first-min-combos N stays
     // as a backward-compatible alias for N+.
@@ -700,7 +716,7 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstRunes, exactFirstRunes: exactRunesMode,
-        startCells, endCell, clearTypes,
+        startCells, endCell, fireRoute, clearTypes,
       }).solve();
       engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
     } else if (maxMode) {
@@ -711,7 +727,7 @@ async function main() {
         maxPath: Number(argValue('--max-path') ?? 30),
         plannerBeamWidth: Math.max(300, Number(argValue('--beam') ?? 0)),
         plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
-        startCells, endCell, clearTypes,
+        startCells, endCell, fireRoute, clearTypes,
       });
       sol = res.solution;
       engine = `MaxFirstCombos(achieved=${res.achieved}/bound=${res.bound})`;
@@ -722,28 +738,37 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
-        startCells, endCell, clearTypes,
+        startCells, endCell, fireRoute, clearTypes,
       }).solve();
       engine = 'DoraSolver';
     }
 
     const missesTarget = () => exactMode ? sol.firstCombos !== minFirstArg : sol.firstCombos < minFirstArg;
+    // DoraSolver's beam often can't gather a scattered scarce type into its
+    // dissolving group(s), so clear-all MISSes; detect it to trigger the
+    // constructive coverage planner (which CAN, unlike a wider beam).
+    const clearAllMissed = () => {
+      if (clearTypes.length === 0) return false;
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null });
+      const totalsByType = t => board.grid.reduce((n, row) => n + row.filter(v => v === t).length, 0);
+      return clearTypes.some(t => sim.firstClearedByType[t] < totalsByType(t));
+    };
 
-    // Guarantee escalation: if the beam search misses the first-combo target,
-    // the two-phase planner either constructs it or proves it impossible.
-    if (!maxMode && minFirstRunes === 0 && minFirstArg > 0 && missesTarget()) {
+    // Guarantee escalation: if beam search misses the first-combo target OR a
+    // clear-all demand, the planner constructs it (or proves it impossible).
+    if (!maxMode && minFirstRunes === 0 && ((minFirstArg > 0 && missesTarget()) || clearAllMissed())) {
       const plannerBeam = Math.max(300, Number(argValue('--beam') ?? 0));
       const plannerMaxPath = Math.max(60, Number(argValue('--max-path') ?? 0));
       const planner = new TargetPlanner(board, {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
         minFirstCombos: minFirstArg, exact: exactMode,
         beamWidth: plannerBeam, maxPath: plannerMaxPath,
-        startCells, endCell, clearTypes,
+        startCells, endCell, fireRoute, clearTypes,
       });
       const planned = planner.solve();
       if (planned.solution) {
         sol = planned.solution;
-        engine = `TargetPlanner(target#${planned.targetsTried})`;
+        engine = clearTypes.length ? `TargetPlanner(clear-all,combos=${planned.solution.comboCount})` : `TargetPlanner(target#${planned.targetsTried})`;
       } else {
         console.log('[TOS] PLANNER=failed reason=' + planned.reason + (planned.reason === 'routing-failed'
           ? ` (targets exist; tried beam=${plannerBeam} maxPath=${plannerMaxPath} targets=${planned.targetsTried}; retry with --beam ${plannerBeam * 2} and/or --max-path ${plannerMaxPath + 30})`
@@ -791,7 +816,7 @@ async function main() {
       }
       console.log('[TOS] CLEAR_ALL=' + detail.join(',') + (unmet.length ? ' MISS' : ' ok'));
       if (unmet.length > 0) {
-        console.log(`[TOS] ABORT=clear-all ${unmet.join('; ')} (no touch sent; a clear-all arrangement needs a WIDER beam — try --beam 8000, then 16000. A longer --max-path does NOT help and wastes time; keep --max-path 60.)`);
+        console.log(`[TOS] ABORT=clear-all ${unmet.join('; ')} (no touch sent; DoraSolver AND the coverage planner both fell short. Retry with a wider --beam and/or --max-path 90; if a required rune is stuck in a sealed/no-dissolve cell it may be impossible.)`);
         return;
       }
     }

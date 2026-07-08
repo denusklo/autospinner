@@ -14,6 +14,25 @@ const CELL_FLAGS = {
 };
 
 /**
+ * Fire-route constraint (AutoDora spec §4.4, "--fire-route"): every cell the
+ * finger LEAVES catches fire; the fire lasts `fireLen` moves, and a move that
+ * re-enters a still-burning cell is forbidden. As the finger advances the
+ * oldest fired cell is released. `path` includes the CURRENT cell as its last
+ * element, so the burning window is the `fireLen` cells immediately BEFORE it
+ * (the current cell you're standing on is not a re-entry target). Returns true
+ * if moving to (nx,ny) is blocked. fireLen<=0 disables the constraint.
+ * (Subsumes the no-immediate-backtrack rule for fireLen>=1.)
+ */
+function fireBlocked(path, nx, ny, fireLen) {
+  if (fireLen <= 0) return false;
+  const end = path.length - 1; // current cell index — excluded (you're on it)
+  for (let i = end - 1; i >= 0 && i >= end - fireLen; i--) {
+    if (path[i].x === nx && path[i].y === ny) return true;
+  }
+  return false;
+}
+
+/**
  * Represents the game board state
  */
 class Board {
@@ -1056,6 +1075,10 @@ class DoraSolver {
     // the caller aborts (phone: [TOS] ABORT=start-end).
     this.startCells = options.startCells ?? null;
     this.endCell = options.endCell ?? null;
+    // Fire-route trail length (see fireBlocked). 0 = off. When >0 the drag may
+    // not re-enter any of the last `fireRoute` cells it left (self-avoiding
+    // within a sliding window). Orthogonal to scoring; composes with everything.
+    this.fireRoute = options.fireRoute ?? 0;
     // First-wave CLEAR-ALL demand (boss "首批消除所有X符石"): every rune of
     // each listed type must dissolve in the FIRST wave. Required count per
     // type = its total count on the input board (drags conserve runes), so
@@ -1209,6 +1232,7 @@ class DoraSolver {
           const nx = s.x + dir.dx, ny = s.y + dir.dy;
           if (nx < 0 || nx >= this.board.width || ny < 0 || ny >= this.board.height) continue;
           if (f(nx, ny) & CELL_FLAGS.NO_SWAP) continue;
+          if (fireBlocked(s.path, nx, ny, this.fireRoute)) continue;
 
           const childBoard = s.board.clone();
           childBoard.swap(s.x, s.y, nx, ny);
@@ -1338,6 +1362,11 @@ class TargetPlanner {
     this.sealedColumns = options.sealedColumns ?? [];
     this.flags = options.flags ?? null;
     this.target = options.minFirstCombos ?? 5;
+    // Combo floor for the CLEAR-ALL path: 0 unless the caller explicitly asked
+    // for first-wave combos. Distinct from `this.target` (which defaults to 5
+    // for the combo-count planner) so a clear-all-only request isn't silently
+    // gated to >=5 combos and told "routing-failed".
+    this.clearAllComboFloor = options.minFirstCombos ?? 0;
     this.exact = options.exact ?? false; // require firstCombos === target, not >=
     this.maxPath = options.maxPath ?? 60;
     this.beamWidth = options.beamWidth ?? 300;
@@ -1351,6 +1380,7 @@ class TargetPlanner {
     // is the primary engine for start/end. startCells alone routes fine.
     this.startCells = options.startCells ?? null;
     this.endCell = options.endCell ?? null;
+    this.fireRoute = options.fireRoute ?? 0; // see fireBlocked
     // Clear-all-of-type demand, VERIFICATION-ONLY here: phase 1 targets
     // first-wave combo count, not required-type coverage, so routed targets
     // violating clearTypes are rejected rather than constructed. DoraSolver's
@@ -1545,6 +1575,7 @@ class TargetPlanner {
           const nx = s.x + dir.dx, ny = s.y + dir.dy;
           if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
           if (!this.movable(nx, ny)) continue;
+          if (fireBlocked(s.path, nx, ny, this.fireRoute)) continue;
           const childBoard = s.board.clone();
           childBoard.swap(s.x, s.y, nx, ny);
           const st = statsOf(childBoard);
@@ -1585,7 +1616,121 @@ class TargetPlanner {
    *         | 'routing-failed' (targets exist; no drag path found — try a
    *           wider beamWidth / longer maxPath)
    */
+  // ---- clear-all-of-type via coverage lines (PROJECT-FACTS P14) ----
+  // DoraSolver's beam can't gather every rune of a scattered scarce type into
+  // one dissolving group (C=4,5 MUST be a single group), so it MISSes clear-all
+  // (measured: 3/5 even at beam 16000, no pins). The fix is CONSTRUCTIVE but
+  // MINIMAL: build a target that only places the required runes into dissolving
+  // straight lines (NO extra combo triples — augmenting the target makes it too
+  // big for routeToTarget to realize AND land on the end pin), route each
+  // placement, and keep the routed board with the most (incidental) combos.
+  // Coverage-only targets route reliably WITH the end pin; augmented ones don't.
+
+  /** All straight-line placements of `len` usable cells of `type` (h and v). */
+  linePlacements(type, len) {
+    const w = this.board.width, h = this.board.height;
+    const usable = (x, y) => this.dissolvable(x, y) && this.movable(x, y);
+    const out = [];
+    if (len <= w) for (let y = 0; y < h; y++) for (let x = 0; x <= w - len; x++) {
+      const cells = []; let ok = true;
+      for (let i = 0; i < len && ok; i++) { if (!usable(x + i, y)) ok = false; else cells.push({x: x + i, y, type}); }
+      if (ok) out.push(cells);
+    }
+    if (len <= h) for (let x = 0; x < w; x++) for (let y = 0; y <= h - len; y++) {
+      const cells = []; let ok = true;
+      for (let i = 0; i < len && ok; i++) { if (!usable(x, y + i)) ok = false; else cells.push({x, y: y + i, type}); }
+      if (ok) out.push(cells);
+    }
+    return out;
+  }
+
+  /** Partition C (>=3) into line-lengths each in [3,6] (greedy 3s, remainder folded). */
+  static partitionCount(C) {
+    if (C <= 6) return [C];
+    const parts = []; let rem = C;
+    while (rem > 6) { parts.push(3); rem -= 3; }
+    if (rem < 3) parts[parts.length - 1] += rem; else parts.push(rem);
+    return parts;
+  }
+
+  /** Coverage placements for one type: each is a list of disjoint dissolving
+   * lines whose cells together cover the type's full count. Capped. */
+  coverageSets(type, budget = 30) {
+    const parts = TargetPlanner.partitionCount(this.clearTypeTotals[type]);
+    const results = [];
+    const dfs = (i, chosen, used) => {
+      if (results.length >= budget) return;
+      if (i === parts.length) { results.push(chosen.map(g => g.slice())); return; }
+      for (const line of this.linePlacements(type, parts[i])) {
+        if (line.some(c => used.has(c.x + ',' + c.y))) continue;
+        line.forEach(c => used.add(c.x + ',' + c.y));
+        dfs(i + 1, [...chosen, line], used);
+        line.forEach(c => used.delete(c.x + ',' + c.y));
+        if (results.length >= budget) return;
+      }
+    };
+    dfs(0, [], new Set());
+    return results;
+  }
+
+  /** Coverage-only candidate targets for the clear-all demand (cartesian across
+   * types, hard-capped). Each target = array of dissolving line-groups. */
+  planClearAllTargets() {
+    const perType = this.clearTypes.map(t => this.coverageSets(t, 30));
+    if (perType.some(list => list.length === 0)) return [];
+    let combos = [[]];
+    for (const list of perType) {
+      const next = [];
+      for (const acc of combos) {
+        const cells = new Set(acc.flat().map(c => c.x + ',' + c.y));
+        for (const cov of list) {
+          if (cov.flat().some(c => cells.has(c.x + ',' + c.y))) continue;
+          next.push([...acc, ...cov]);
+          if (next.length >= 30) break;
+        }
+        if (next.length >= 30) break;
+      }
+      combos = next;
+      if (combos.length === 0) return [];
+    }
+    return combos;
+  }
+
+  /** Route many coverage placements; keep the one that clears everything (and
+   * meets any first-combo target) with the MOST total combos. */
+  solveClearAll() {
+    const targets = this.planClearAllTargets();
+    if (targets.length === 0) return {solution: null, reason: 'no-feasible-target', targetsTried: 0};
+    let best = null, bestCombos = -1, tried = 0;
+    const budget = Math.max(this.maxTargets, 30);
+    for (const target of targets) {
+      if (tried >= budget) break;
+      tried++;
+      const route = this.routeToTarget(target);
+      if (route === null) continue;
+      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags});
+      if (this.clearTypes.some(t => sim.firstClearedByType[t] < this.clearTypeTotals[t])) continue;
+      if (this.clearAllComboFloor > 0 && (this.exact ? sim.firstCombos !== this.clearAllComboFloor : sim.firstCombos < this.clearAllComboFloor)) continue;
+      if (sim.totalCombos > bestCombos) {
+        bestCombos = sim.totalCombos;
+        best = {
+          startX: route.startX, startY: route.startY,
+          path: route.path, moves: route.moves, board: route.board,
+          score: sim.totalCombos * 4, comboCount: sim.totalCombos,
+          firstCombos: sim.firstCombos, firstRunes: sim.firstRunes,
+          firstClearedByType: sim.firstClearedByType, chains: sim.chains,
+        };
+        if (this.verbose) console.log(`[TargetPlanner] clear-all target #${tried}: combos=${sim.totalCombos}`);
+      }
+    }
+    return best ? {solution: best, reason: 'ok', targetsTried: tried}
+                : {solution: null, reason: 'routing-failed', targetsTried: tried};
+  }
+
   solve() {
+    // Clear-all needs constructive coverage (beam search MISSes scattered scarce
+    // types); route many coverage placements and keep the highest-combo one.
+    if (this.clearTypes.length > 0) return this.solveClearAll();
     const targets = this.planTargets();
     if (targets.length === 0) return {solution: null, reason: 'no-feasible-target', targetsTried: 0};
     let tried = 0;
@@ -1627,6 +1772,7 @@ function solveMaxFirstCombos(board, options = {}) {
   const flags = options.flags ?? null;
   const startCells = options.startCells ?? null;
   const endCell = options.endCell ?? null;
+  const fireRoute = options.fireRoute ?? 0;
   const clearTypes = options.clearTypes ?? [];
   const flag = (x, y) => flags === null ? 0 : flags[y][x];
 
@@ -1645,7 +1791,7 @@ function solveMaxFirstCombos(board, options = {}) {
   const dora = new DoraSolver(board, {
     beamWidth: options.beamWidth ?? 200, maxPath: options.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: options.priorityCells ?? [], startCells, endCell, clearTypes,
+    priorityCells: options.priorityCells ?? [], startCells, endCell, fireRoute, clearTypes,
   }).solve();
   let best = dora, achieved = dora.firstCombos;
 
@@ -1654,7 +1800,7 @@ function solveMaxFirstCombos(board, options = {}) {
       sealedColumns, flags, minFirstCombos: n,
       beamWidth: options.plannerBeamWidth ?? 300,
       maxPath: options.plannerMaxPath ?? 60,
-      startCells, endCell, clearTypes,
+      startCells, endCell, fireRoute, clearTypes,
     }).solve();
     if (res.solution) { best = res.solution; achieved = n; break; }
   }

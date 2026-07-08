@@ -23,6 +23,25 @@
  *     For all three: DoraSolver tries first, TargetPlanner constructs the
  *     arrangement if the beam misses, abort only if impossible/unroutable
  *     (no touch sent on abort). --first-min-combos N = legacy alias for N+.
+ *   node phone/autospin.js --clear-all heart      # first wave must dissolve EVERY
+ *                                                # heart on the board (boss 首批消除
+ *                                                # 所有X符石). Comma list for several
+ *                                                # types: --clear-all heart,water
+ *                                                # (letters w/f/g/l/d/h or digits 0-5
+ *                                                # work too). STRICT about thorn/sealed
+ *                                                # columns: required runes there must be
+ *                                                # dragged out and dissolved; fewer than
+ *                                                # 3 of a type on the board = provably
+ *                                                # impossible (abort, no touch). Composes
+ *                                                # with --first-combos/-runes, --sealed,
+ *                                                # --start/--end. Clear-all alone CLUMPS the
+ *                                                # required runes into one big group (1 combo);
+ *                                                # add --first-combos N+ to split them into
+ *                                                # multiple 3-groups for more combos (e.g.
+ *                                                # --clear-all dark --first-combos 5+ turned a
+ *                                                # 6-dark blob into [3,3] = 8 total combos). If
+ *                                                # clear-all MISSes, raise --beam (8000+), keep
+ *                                                # --max-path ~60 (a long path does not help).
  *   node phone/autospin.js --beam 800            # wider beam search (default 200; slower, finds more)
  *   node phone/autospin.js --max-path 40         # longer drag budget (default 30 moves)
  *   node phone/autospin.js --move-ms 215         # ms per CELL move (decimals ok) — the direct,
@@ -70,7 +89,7 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Board, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS } = require('../algorithm.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
 const ROWS = [1330, 1510, 1690, 1870, 2050];
@@ -158,12 +177,17 @@ function cellStats(img, cx, cy) {
 // electric cells swing up to ~60/frame, all normal runes are frame-stable).
 const isElectricGlow = rgb => ((rgb[0] > 210 ? 1 : 0) + (rgb[1] > 210 ? 1 : 0) + (rgb[2] > 205 ? 1 : 0)) >= 2;
 
-function classify(stats) {
+function classify(stats, skipGlow = false) {
   // Electric runes (P11): near-white cyan, flickering arcs. Interrupt the
   // spin when touched or passed through. NOTE: single-frame whiteness can be
   // a GHOST (arc flare bleeding from a neighboring shock) — final electric
   // status requires persistence across frames (readBoardFromScreen).
-  if (isElectricGlow(stats.rgb)) {
+  // skipGlow=true forces a pure nearest-signature match: the burst path uses
+  // it once a glow candidate has FAILED the flicker test, so an enhanced
+  // (bright) rune is classified by its real color instead of leaking through
+  // as the type:0 placeholder this early-return would otherwise return
+  // (LESSONS L18 — an enhanced Heart was misread as electric, then as Water).
+  if (!skipGlow && isElectricGlow(stats.rgb)) {
     return { type: 0, thorn: false, electric: true, dist: 0, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
   }
   let best = null, bestDist = Infinity;
@@ -260,20 +284,31 @@ function readBoardFromScreen() {
           const a = statsPerFrame[k - 1].rgb, b = statsPerFrame[k].rgb;
           maxDelta = Math.max(maxDelta, Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]));
         }
-        const meanMin = Math.min(...[0, 1, 2].map(ch => statsPerFrame.reduce((s, f) => s + f.rgb[ch], 0) / statsPerFrame.length));
-        // Electric = persistent glow + flicker (or all channels lifted, which
-        // no enhanced rune shows). Frame-stable glowless cells are normal.
-        if (candFrames >= 2 && (maxDelta > 25 || meanMin > 90)) {
+        // Electric confirmation = glow candidate in >=2 frames AND FLICKER.
+        // Flicker is the sole reliable discriminator: P11 shocks swing maxDelta
+        // up to ~60 across a burst, while every normal AND enhanced rune is
+        // frame-stable (<=15). The old "|| meanMin > 90" fallback assumed no
+        // enhanced rune lifts all channels — false for enhanced (white-sparkle)
+        // Heart, measured live at (244,172,210): a glow candidate (r,b over
+        // threshold) with all channels high (meanMin 172) yet dead-stable
+        // (maxDelta ~7). It was misread as an electric Heart, flagged
+        // NO_PICKUP, and blocked --start on that cell (LESSONS L18). Requiring
+        // flicker removes the false positive and leaves real shocks (which do
+        // flicker) detected.
+        if (candFrames >= 2 && maxDelta > 25) {
           const c = { type: 0, thorn: false, electric: true, dist: 0, rgb: statsPerFrame[0].rgb.map(Math.round), darkPct: statsPerFrame[0].darkPct };
           const base = electricBase(imgs, COLS[gx], ROWS[gy]);
           if (base === -1) { c.dist = 999; c.unknownBase = true; } // refuse loudly
           else c.type = base;
           cells[gy][gx] = c;
         } else {
-          // not electric: classify from the least-white frame to dodge flares
+          // not electric: classify from the least-white frame to dodge flares.
+          // skipGlow=true so a bright glow-candidate that failed the flicker
+          // test is matched to its real signature (enhanced Heart -> Heart),
+          // not returned as the type:0 electric placeholder (L18).
           const s = statsPerFrame.reduce((a, b) =>
             Math.min(a.rgb[1], a.rgb[2]) <= Math.min(b.rgb[1], b.rgb[2]) ? a : b);
-          const c = classify(s);
+          const c = classify(s, true);
           c.electric = false; // transient flare suppressed
           cells[gy][gx] = c;
         }
@@ -629,6 +664,32 @@ async function main() {
     const rawRunes = argValue('--first-runes');
     const exactRunesMode = rawRunes !== null && !String(rawRunes).endsWith('+');
     const minFirstRunes = Number(String(rawRunes ?? 0).replace(/\+$/, ''));
+    // --clear-all TYPES: the first wave must dissolve EVERY rune of each
+    // listed type. Accepts full names / letters / digits, comma-separated
+    // (e.g. "heart", "h,w", "5,0"). STRICT semantics: the required count is
+    // the type's total count on the board, so runes sitting in thorn/sealed
+    // columns or NO_DISSOLVE cells must be dragged OUT and dissolved —
+    // parking a required rune into a sealed column never satisfies the boss.
+    const clearArg = argValue('--clear-all');
+    const clearTypes = [...new Set((clearArg ?? '').split(',').filter(Boolean).map(s => {
+      const tok = s.trim().toLowerCase();
+      const t = /^[0-5]$/.test(tok) ? Number(tok)
+        : TYPE_LETTERS.indexOf(tok) !== -1 ? TYPE_LETTERS.indexOf(tok)
+        : TYPE_NAMES.map(n => n.toLowerCase()).indexOf(tok);
+      if (t === -1) throw new Error(`--clear-all: unknown rune type "${s.trim()}" (use ${TYPE_NAMES.join('/')}, ${TYPE_LETTERS.join('/')}, or 0-5)`);
+      return t;
+    }))];
+    if (clearTypes.length > 0) {
+      const totals = clearTypes.map(t => ({ t, n: cells.flat().filter(c => c.type === t).length }));
+      console.log('[TOS] CLEAR_ALL_TARGET=' + totals.map(o => `${TYPE_NAMES[o.t]}:${o.n}`).join(',')
+        + ' (strict: thorn-column runes must be dragged out and dissolved)');
+      const dead = totals.filter(o => o.n > 0 && o.n < 3);
+      if (dead.length > 0) {
+        console.log('[TOS] ABORT=clear-all-infeasible ' + dead.map(o => `${TYPE_NAMES[o.t]}=${o.n}`).join(',')
+          + ' — fewer than 3 of a type can never form a dissolve group (no touch sent)');
+        return;
+      }
+    }
     const t0 = Date.now();
     let sol, engine;
 
@@ -639,7 +700,7 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstRunes, exactFirstRunes: exactRunesMode,
-        startCells, endCell,
+        startCells, endCell, clearTypes,
       }).solve();
       engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
     } else if (maxMode) {
@@ -650,7 +711,7 @@ async function main() {
         maxPath: Number(argValue('--max-path') ?? 30),
         plannerBeamWidth: Math.max(300, Number(argValue('--beam') ?? 0)),
         plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
-        startCells, endCell,
+        startCells, endCell, clearTypes,
       });
       sol = res.solution;
       engine = `MaxFirstCombos(achieved=${res.achieved}/bound=${res.bound})`;
@@ -661,7 +722,7 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
-        startCells, endCell,
+        startCells, endCell, clearTypes,
       }).solve();
       engine = 'DoraSolver';
     }
@@ -677,7 +738,7 @@ async function main() {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
         minFirstCombos: minFirstArg, exact: exactMode,
         beamWidth: plannerBeam, maxPath: plannerMaxPath,
-        startCells, endCell,
+        startCells, endCell, clearTypes,
       });
       const planned = planner.solve();
       if (planned.solution) {
@@ -703,6 +764,34 @@ async function main() {
       const endOk = !endCell || (last.x === endCell.x && last.y === endCell.y);
       if (sol.moves.length === 0 || !startOk || !endOk) {
         console.log(`[TOS] ABORT=start-end required start=${startCell ? `${startCell.x},${startCell.y}` : 'any'} end=${endCell ? `${endCell.x},${endCell.y}` : 'any'} but got start=${first.x},${first.y} end=${last.x},${last.y} moves=${sol.moves.length} — unreachable within --max-path ${Number(argValue('--max-path') ?? 30)} (raise --max-path, or relax --start/--end); no touch sent`);
+        return;
+      }
+    }
+
+    // Clear-all gate: recompute from the post-drag board (engine-independent
+    // — planner solutions and max mode pass through here too). Totals are
+    // counted on sol.board (drags conserve runes, so they equal the original
+    // board's counts); "trapped" = required runes the drag LEFT in sealed /
+    // no-dissolve cells, which is why the demand failed there.
+    if (clearTypes.length > 0) {
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null });
+      const detail = [], unmet = [];
+      for (const t of clearTypes) {
+        let total = 0, trapped = 0;
+        for (let y = 0; y < 5; y++) {
+          for (let x = 0; x < 6; x++) {
+            if (sol.board.get(x, y) !== t) continue;
+            total++;
+            if (sealedCols.includes(x) || (hasFlags && (flagGrid[y][x] & CELL_FLAGS.NO_DISSOLVE) !== 0)) trapped++;
+          }
+        }
+        const cleared = sim.firstClearedByType[t];
+        detail.push(`${TYPE_NAMES[t]}:${cleared}/${total}`);
+        if (cleared < total) unmet.push(`${TYPE_NAMES[t]} ${total - cleared} left` + (trapped > 0 ? ` (${trapped} stuck in sealed/no-dissolve cells)` : ''));
+      }
+      console.log('[TOS] CLEAR_ALL=' + detail.join(',') + (unmet.length ? ' MISS' : ' ok'));
+      if (unmet.length > 0) {
+        console.log(`[TOS] ABORT=clear-all ${unmet.join('; ')} (no touch sent; a clear-all arrangement needs a WIDER beam — try --beam 8000, then 16000. A longer --max-path does NOT help and wastes time; keep --max-path 60.)`);
         return;
       }
     }

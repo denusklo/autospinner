@@ -952,23 +952,29 @@ class BoardSimulator {
   /**
    * Clear matches, apply gravity, repeat until stable (spec §2 Step 4).
    * Mutates a clone; the input board is untouched.
-   * @returns {{totalCombos, firstCombos, firstRunes, chains, groups, boardAfter}}
+   * @returns {{totalCombos, firstCombos, firstRunes, firstClearedByType, chains, groups, boardAfter}}
    *   firstRunes = total orbs dissolved in the FIRST wave (some bosses, e.g.
    *   楊玉環 "NUM N", require clearing >= N runes in the first batch to deal
-   *   damage — distinct from combo COUNT).
+   *   damage — distinct from combo COUNT). firstClearedByType[t] = orbs of
+   *   type t dissolved in the first wave (clear-all-of-type demands).
    */
   static resolve(board, options = {}) {
     const sealedColumns = options.sealedColumns ?? [];
     const flags = options.flags ?? null;
     const work = board.clone();
     let totalCombos = 0, firstCombos = 0, firstRunes = 0, chains = 0;
+    const firstClearedByType = Array(6).fill(0);
     const allGroups = [];
 
     while (true) {
       const groups = BoardSimulator.findComboGroups(work, sealedColumns, flags);
       if (groups.length === 0) break;
       chains++;
-      if (chains === 1) { firstCombos = groups.length; firstRunes = groups.reduce((s, g) => s + g.cells.length, 0); }
+      if (chains === 1) {
+        firstCombos = groups.length;
+        firstRunes = groups.reduce((s, g) => s + g.cells.length, 0);
+        for (const g of groups) firstClearedByType[g.type] += g.cells.length;
+      }
       totalCombos += groups.length;
       allGroups.push(...groups);
 
@@ -990,7 +996,7 @@ class BoardSimulator {
       }
     }
 
-    return {totalCombos, firstCombos, firstRunes, chains, groups: allGroups, boardAfter: work};
+    return {totalCombos, firstCombos, firstRunes, firstClearedByType, chains, groups: allGroups, boardAfter: work};
   }
 }
 
@@ -1050,6 +1056,21 @@ class DoraSolver {
     // the caller aborts (phone: [TOS] ABORT=start-end).
     this.startCells = options.startCells ?? null;
     this.endCell = options.endCell ?? null;
+    // First-wave CLEAR-ALL demand (boss "首批消除所有X符石"): every rune of
+    // each listed type must dissolve in the FIRST wave. Required count per
+    // type = its total count on the input board (drags conserve runes), so
+    // this is STRICT about sealed columns / NO_DISSOLVE cells: runes there
+    // cannot dissolve, hence the solver must drag required runes OUT of them
+    // (steered via the trapped-rune penalty), and parking a required rune
+    // INTO one can never satisfy the demand. Composes with every other knob;
+    // e.g. clearTypes: [5] = all Hearts, [5, 0] = all Hearts and all Waters.
+    this.clearTypes = [...new Set(options.clearTypes ?? [])];
+    this.clearTypeTotals = Array(6).fill(0);
+    if (this.clearTypes.length > 0) {
+      for (let y = 0; y < board.height; y++) {
+        for (let x = 0; x < board.width; x++) this.clearTypeTotals[board.get(x, y)]++;
+      }
+    }
     // TUNABLE (spec §9: exact values unpublished). colorWeights indexed by
     // PROJECT encoding: [Water, Fire, Wood, Light, Dark, Heart].
     this.tunable = Object.assign({
@@ -1087,8 +1108,10 @@ class DoraSolver {
    * Partial progress toward first-wave groups: adjacent same-color pairs in
    * the dissolvable area. Lets the beam see "almost-groups" as progress so
    * setup-heavy paths survive pruning (only used below the first-combo target).
+   * @param {number[]|null} types restrict to these rune types (clearTypes
+   *   steering); null = all types.
    */
-  pairPotential(board) {
+  pairPotential(board, types = null) {
     const sealed = new Set(this.sealedColumns);
     const nd = (x, y) => sealed.has(x) ||
       (this.flags !== null && (this.flags[y][x] & CELL_FLAGS.NO_DISSOLVE) !== 0);
@@ -1098,11 +1121,30 @@ class DoraSolver {
         if (nd(x, y)) continue;
         const t = board.get(x, y);
         if (t === -1) continue;
+        if (types !== null && !types.includes(t)) continue;
         if (x + 1 < board.width && !nd(x + 1, y) && board.get(x + 1, y) === t) pairs++;
         if (y + 1 < board.height && !nd(x, y + 1) && board.get(x, y + 1) === t) pairs++;
       }
     }
     return pairs;
+  }
+
+  /**
+   * clearTypes runes currently sitting in undissolvable cells (sealed columns
+   * / NO_DISSOLVE). Each one provably blocks the clear-all demand until it is
+   * dragged out, so steering penalizes them — a dense gradient toward
+   * extracting required runes from thorn-fenced columns.
+   */
+  trappedRequiredCount(board) {
+    const sealed = new Set(this.sealedColumns);
+    let n = 0;
+    for (let y = 0; y < board.height; y++) {
+      for (let x = 0; x < board.width; x++) {
+        if (!sealed.has(x) && (this.flags === null || (this.flags[y][x] & CELL_FLAGS.NO_DISSOLVE) === 0)) continue;
+        if (this.clearTypes.includes(board.get(x, y))) n++;
+      }
+    }
+    return n;
   }
 
   /**
@@ -1195,6 +1237,23 @@ class DoraSolver {
               steer += this.pairPotential(childBoard) * this.tunable.pairSteer;
             }
           }
+          // Steer toward the clear-all demand: reward each required-type rune
+          // dissolved in wave 1, penalize required runes still trapped in
+          // undissolvable cells (must be dragged out first), and count
+          // required-color adjacent pairs as partial progress while unmet.
+          let clearAllOk = true;
+          if (this.clearTypes.length > 0) {
+            let cleared = 0;
+            for (const t of this.clearTypes) {
+              cleared += sim.firstClearedByType[t];
+              if (sim.firstClearedByType[t] < this.clearTypeTotals[t]) clearAllOk = false;
+            }
+            steer += cleared * this.tunable.firstComboSteer;
+            steer -= this.trappedRequiredCount(childBoard) * this.tunable.firstComboSteer;
+            if (!clearAllOk) {
+              steer += this.pairPotential(childBoard, this.clearTypes) * this.tunable.pairSteer;
+            }
+          }
           const child = {
             board: childBoard, x: nx, y: ny,
             startX: s.startX, startY: s.startY,
@@ -1202,7 +1261,8 @@ class DoraSolver {
             moves: [...s.moves, dir.name],
             prevDir: dir, weight, searchScore: weight + steer,
             comboCount: sim.totalCombos, firstCombos: sim.firstCombos,
-            firstRunes: sim.firstRunes, chains: sim.chains,
+            firstRunes: sim.firstRunes, firstClearedByType: sim.firstClearedByType,
+            chains: sim.chains,
           };
           children.push(child);
           // endCell gate: a state is only eligible as the final answer when
@@ -1215,9 +1275,10 @@ class DoraSolver {
               : sim.firstCombos >= this.minFirstCombos))
             && (this.minFirstRunes === 0 || (this.exactFirstRunes
               ? sim.firstRunes === this.minFirstRunes
-              : sim.firstRunes >= this.minFirstRunes));
-          if ((this.minFirstCombos > 0 || this.minFirstRunes > 0) && qualifies
-              && endOk && better(child, bestQualified)) bestQualified = child;
+              : sim.firstRunes >= this.minFirstRunes))
+            && clearAllOk;
+          if ((this.minFirstCombos > 0 || this.minFirstRunes > 0 || this.clearTypes.length > 0)
+              && qualifies && endOk && better(child, bestQualified)) bestQualified = child;
         }
       }
       if (children.length === 0) break;
@@ -1242,13 +1303,14 @@ class DoraSolver {
     // the global best (caller checks firstCombos and may abort).
     const pick = bestQualified ?? best;
     if (pick === null) {
-      return {startX: 0, startY: 0, path: [{x: 0, y: 0}], moves: [], score: 0, comboCount: 0, firstCombos: 0, firstRunes: 0, chains: 0, board: this.board.clone()};
+      return {startX: 0, startY: 0, path: [{x: 0, y: 0}], moves: [], score: 0, comboCount: 0, firstCombos: 0, firstRunes: 0, firstClearedByType: Array(6).fill(0), chains: 0, board: this.board.clone()};
     }
     return {
       startX: pick.startX, startY: pick.startY,
       path: pick.path, moves: pick.moves,
       score: pick.weight, comboCount: pick.comboCount,
-      firstCombos: pick.firstCombos, firstRunes: pick.firstRunes, chains: pick.chains,
+      firstCombos: pick.firstCombos, firstRunes: pick.firstRunes,
+      firstClearedByType: pick.firstClearedByType, chains: pick.chains,
       board: pick.board,
     };
   }
@@ -1289,6 +1351,18 @@ class TargetPlanner {
     // is the primary engine for start/end. startCells alone routes fine.
     this.startCells = options.startCells ?? null;
     this.endCell = options.endCell ?? null;
+    // Clear-all-of-type demand, VERIFICATION-ONLY here: phase 1 targets
+    // first-wave combo count, not required-type coverage, so routed targets
+    // violating clearTypes are rejected rather than constructed. DoraSolver's
+    // clearTypes steering is the primary engine for clear-all demands; this
+    // filter just keeps a planner fallback from returning a violating path.
+    this.clearTypes = [...new Set(options.clearTypes ?? [])];
+    this.clearTypeTotals = Array(6).fill(0);
+    if (this.clearTypes.length > 0) {
+      for (let y = 0; y < board.height; y++) {
+        for (let x = 0; x < board.width; x++) this.clearTypeTotals[board.get(x, y)]++;
+      }
+    }
   }
 
   flag(x, y) { return this.flags === null ? 0 : this.flags[y][x]; }
@@ -1522,13 +1596,16 @@ class TargetPlanner {
       const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags});
       // reject accidental merges/extras (exact) or shortfalls (both modes)
       if (this.exact ? sim.firstCombos !== this.target : sim.firstCombos < this.target) continue;
+      // reject routes that violate a clear-all-of-type demand
+      if (this.clearTypes.some(t => sim.firstClearedByType[t] < this.clearTypeTotals[t])) continue;
       if (this.verbose) console.log(`[TargetPlanner] target #${tried} routed in ${route.moves.length} moves, first=${sim.firstCombos}`);
       return {
         solution: {
           startX: route.startX, startY: route.startY,
           path: route.path, moves: route.moves, board: route.board,
           score: sim.totalCombos * 4, comboCount: sim.totalCombos,
-          firstCombos: sim.firstCombos, chains: sim.chains,
+          firstCombos: sim.firstCombos, firstRunes: sim.firstRunes,
+          firstClearedByType: sim.firstClearedByType, chains: sim.chains,
         },
         reason: 'ok', targetsTried: tried,
       };
@@ -1550,6 +1627,7 @@ function solveMaxFirstCombos(board, options = {}) {
   const flags = options.flags ?? null;
   const startCells = options.startCells ?? null;
   const endCell = options.endCell ?? null;
+  const clearTypes = options.clearTypes ?? [];
   const flag = (x, y) => flags === null ? 0 : flags[y][x];
 
   const counts = Array(6).fill(0);
@@ -1567,7 +1645,7 @@ function solveMaxFirstCombos(board, options = {}) {
   const dora = new DoraSolver(board, {
     beamWidth: options.beamWidth ?? 200, maxPath: options.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: options.priorityCells ?? [], startCells, endCell,
+    priorityCells: options.priorityCells ?? [], startCells, endCell, clearTypes,
   }).solve();
   let best = dora, achieved = dora.firstCombos;
 
@@ -1576,7 +1654,7 @@ function solveMaxFirstCombos(board, options = {}) {
       sealedColumns, flags, minFirstCombos: n,
       beamWidth: options.plannerBeamWidth ?? 300,
       maxPath: options.plannerMaxPath ?? 60,
-      startCells, endCell,
+      startCells, endCell, clearTypes,
     }).solve();
     if (res.solution) { best = res.solution; achieved = n; break; }
   }

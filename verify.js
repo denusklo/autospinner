@@ -261,6 +261,81 @@ const exactRunes = new DoraSolver(mk(BOARDS[2]), {beamWidth: 200, maxPath: 30, m
 check('S16 exact rune target hit precisely', exactRunes.firstRunes, 12);
 check('S16 exact honest (independent resolve)', BoardSimulator.resolve(exactRunes.board).firstRunes, 12);
 
+// --- Clear-all-of-type (boss "首批消除所有X符石"): every rune of the listed
+// type(s) must dissolve in the FIRST wave. STRICT about sealed columns /
+// NO_DISSOLVE cells: required runes there must be dragged OUT and dissolved;
+// parking a required rune into one never satisfies the demand ---
+
+// C1: BoardSimulator reports per-type wave-1 counts (cascade waves excluded)
+check('C1 firstClearedByType counts wave-1 orbs by type',
+  BoardSimulator.resolve(run4).firstClearedByType, [4,0,0,0,0,0]);
+check('C1 cascade wave-2 orbs not counted',
+  BoardSimulator.resolve(cascade).firstClearedByType, [5,0,0,0,0,0]);
+
+// C2: single type — board with hearts (0,0),(0,1),(1,2): all 3 must go wave 1
+const caBoard = mk([
+  [5,2,1,3,4,1],
+  [5,1,2,0,3,2],
+  [1,5,3,0,4,3],
+  [2,3,4,1,0,2],
+  [4,1,2,3,2,4],
+]);
+check('C2 board is stable (no free matches)', BoardSimulator.resolve(caBoard).totalCombos, 0);
+const ca2 = new DoraSolver(caBoard, {beamWidth: 200, maxPath: 20, clearTypes: [5]}).solve();
+check('C2 first wave clears ALL hearts', ca2.firstClearedByType[5], 3);
+check('C2 honest (independent resolve)',
+  BoardSimulator.resolve(ca2.board).firstClearedByType[5], 3);
+
+// C3: multiple types — all hearts AND all waters (3 each) in the first wave
+const ca3 = new DoraSolver(caBoard, {beamWidth: 300, maxPath: 25, clearTypes: [5, 0]}).solve();
+check('C3 first wave clears ALL hearts and ALL waters',
+  [ca3.firstClearedByType[5], ca3.firstClearedByType[0]], [3, 3]);
+const ca3sim = BoardSimulator.resolve(ca3.board);
+check('C3 honest (independent resolve)',
+  [ca3sim.firstClearedByType[5], ca3sim.firstClearedByType[0]], [3, 3]);
+
+// C4: thorn-fenced column — a required heart sits IN sealed col 0 at (0,2);
+// the solver must drag it out and dissolve all 3 hearts, clearing nothing
+// inside the sealed column
+const caSealed = mk([
+  [0,1,2,3,4,0],
+  [1,2,5,0,1,2],
+  [5,3,1,2,3,4],
+  [1,0,5,4,0,1],
+  [2,4,1,0,2,3],
+]);
+check('C4 board is stable under seal', BoardSimulator.resolve(caSealed, {sealedColumns: [0]}).totalCombos, 0);
+const ca4 = new DoraSolver(caSealed, {beamWidth: 200, maxPath: 12, sealedColumns: [0], clearTypes: [5]}).solve();
+const ca4sim = BoardSimulator.resolve(ca4.board, {sealedColumns: [0]});
+check('C4 sealed heart extracted and all hearts cleared wave 1', ca4sim.firstClearedByType[5], 3);
+check('C4 nothing dissolved inside the sealed column',
+  ca4sim.groups.every(g => g.cells.every(([x]) => x !== 0)), true);
+let ca4wf = ca4.path[0].x === ca4.startX && ca4.path[0].y === ca4.startY
+  && ca4.moves.length === ca4.path.length - 1;
+for (let j = 1; j < ca4.path.length; j++) {
+  const d = Math.abs(ca4.path[j].x - ca4.path[j - 1].x) + Math.abs(ca4.path[j].y - ca4.path[j - 1].y);
+  if (d !== 1) ca4wf = false;
+}
+check('C4 extraction path well-formed', ca4wf, true);
+
+// C5: provably infeasible — only 2 hearts exist (a group needs 3), so no
+// solution can qualify; the returned fallback must show hearts UNCLEARED
+// (the CLI abort gate keys on cleared < total)
+const caTwo = mk([
+  [5,2,1,3,4,1],
+  [4,1,2,0,3,2],
+  [1,5,3,0,4,3],
+  [2,3,4,1,0,2],
+  [4,1,2,3,2,4],
+]);
+const ca5 = new DoraSolver(caTwo, {beamWidth: 100, maxPath: 12, clearTypes: [5]}).solve();
+check('C5 2-heart demand cannot be met (cleared stays 0 of 2)', ca5.firstClearedByType[5], 0);
+
+// C6: composes with start pinning — pinned seed honored AND all hearts cleared
+const ca6 = new DoraSolver(caBoard, {beamWidth: 300, maxPath: 20, clearTypes: [5], startCells: [{x: 1, y: 2}]}).solve();
+check('C6 start pin honored under clear-all', [ca6.startX, ca6.startY], [1, 2]);
+check('C6 all hearts still cleared wave 1', ca6.firstClearedByType[5], 3);
+
 // --- Priority cells (electric runes, P11): first-wave clearing rewarded,
 // cell itself untouchable (NO_PICKUP|NO_SWAP) but still dissolvable ---
 

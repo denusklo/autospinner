@@ -594,6 +594,79 @@ const tmFire = new DoraSolver(tmSolBoard(), {beamWidth: 400, maxPath: 20, twoMat
 check('TM composes with fire-route (path fire-legal + honest)',
   fireRouteInvariant(tmFire.path, 6) && BoardSimulator.resolve(tmFire.board, {twoMatch: [5]}).totalCombos === tmFire.comboCount, true);
 
+// --- Mandatory-vs-optional demand priority (bug found 2026-07-09 live: a
+// board where --clear-all + --first-combos max returned 0/5 cleared even
+// though a 5/5-clearing solution existed in the same beam). clearTypes is a
+// MANDATORY demand (P14); minFirstCombos/minFirstRunes are optional targets.
+// Before the fix, `pick = bestQualified ?? best` fell straight to the fully-
+// unconstrained best (which can violate clear-all) whenever the optional
+// target was unreachable jointly with clear-all — even if a clear-all-only
+// solution existed in the beam. Fix: bestClearAllOnly is now a middle tier.
+const mdBoard = mk([
+  [2,4,1,0,4,2],
+  [4,3,5,3,0,2],
+  [2,0,5,2,2,0],
+  [2,3,1,4,4,2],
+  [3,2,3,3,0,4],
+]);
+// minFirstCombos=20 is far beyond any achievable bound on this board, so
+// bestQualified is guaranteed null — isolates the fallback tier.
+const mdFrontier = new DoraSolver(mdBoard, {beamWidth: 1500, maxPath: 60, clearTypes: [0], minFirstCombos: 20, emitFrontier: true}).solve();
+check('MD unreachable combo target makes bestQualified null (test isolates the fallback)',
+  mdFrontier.bestQualified, null);
+check('MD best (unconstrained) actually violates clear-all on this board (proves the bug is real)',
+  BoardSimulator.resolve(mdFrontier.best.board).firstClearedByType[0] < 5, true);
+const mdSol = new DoraSolver(mdBoard, {beamWidth: 1500, maxPath: 60, clearTypes: [0], minFirstCombos: 20}).solve();
+check('MD solve() picks the clear-all-satisfying fallback, not the unconstrained best',
+  BoardSimulator.resolve(mdSol.board).firstClearedByType[0], 5);
+
+// --- Parallel-driver hooks (phone/parallel.js): emitFrontier / seedBeam ---
+// The worker sharding itself is async (worker_threads) and benchmarked via
+// the autospin CLI; these checks prove the algorithm.js building blocks:
+// a prefix run + a resumed run must EXACTLY reproduce a direct solve.
+const pwBoard = () => mk([[0,1,2,3,4,5],[5,0,1,2,3,4],[4,5,0,1,2,3],[3,4,5,0,1,2],[2,3,4,5,0,1]]);
+
+// PW1: emitFrontier returns the live beam after exactly maxPath steps, as
+// plain serializable states (grid arrays, not Board instances).
+const pwPre = new DoraSolver(pwBoard(), {beamWidth: 150, maxPath: 3, emitFrontier: true}).solve();
+check('PW1 frontier states are plain 3-move states',
+  pwPre.frontier.every(s => s.path.length === 4 && s.moves.length === 3 && Array.isArray(s.grid) && !(s.grid instanceof Board)), true);
+check('PW1 frontier non-empty, pruned to beamWidth', pwPre.frontier.length > 0 && pwPre.frontier.length <= 150, true);
+
+// PW2: prefix(3) + resume(7) with the same beamWidth === direct solve(10).
+// Merge prefers the prefix-era candidate on full ties (the sequential search
+// keeps the FIRST solution found at equal weight/combos/length).
+const pwDirect = new DoraSolver(pwBoard(), {beamWidth: 150, maxPath: 10}).solve();
+const pwRes = new DoraSolver(pwBoard(), {beamWidth: 150, maxPath: 7, seedBeam: pwPre.frontier}).solve();
+const pwStrictlyBetter = (a, b) => a.score !== b.score ? a.score > b.score
+  : a.comboCount !== b.comboCount ? a.comboCount > b.comboCount : a.moves.length < b.moves.length;
+const pwMerged = (pwRes.moves.length > 0 && (pwPre.best === null || pwStrictlyBetter(pwRes, pwPre.best))) ? pwRes : pwPre.best;
+check('PW2 prefix+resume equals direct solve exactly',
+  [pwMerged.score, pwMerged.comboCount, pwMerged.path.map(p => p.x + ',' + p.y).join(' ')],
+  [pwDirect.score, pwDirect.comboCount, pwDirect.path.map(p => p.x + ',' + p.y).join(' ')]);
+
+// PW3: the hooks compose with steering demands — a resumed search still
+// honors minFirstCombos and stays honest vs an independent resolve.
+const pwPre2 = new DoraSolver(pwBoard(), {beamWidth: 200, maxPath: 2, emitFrontier: true, minFirstCombos: 2}).solve();
+const pwRes2 = new DoraSolver(pwBoard(), {beamWidth: 200, maxPath: 10, seedBeam: pwPre2.frontier, minFirstCombos: 2}).solve();
+check('PW3 resumed solve meets the demand honestly',
+  pwRes2.firstCombos >= 2 && BoardSimulator.resolve(pwRes2.board).totalCombos === pwRes2.comboCount, true);
+
+// PW4: solveClearAll(targetsOverride) — routing an explicitly-passed target
+// list (the clear-all shard building block) reproduces the planned run.
+const pwCA = new TargetPlanner(mk([
+  [5,1,2,3,4,0],
+  [2,3,4,0,1,2],
+  [5,4,0,1,2,3],
+  [5,0,1,2,3,4],
+  [0,1,3,4,0,1],
+]), {clearTypes: [5], beamWidth: 200, maxPath: 30});
+const pwFull = pwCA.solveClearAll();
+const pwSub = pwCA.solveClearAll(pwCA.planClearAllTargets());
+check('PW4 targetsOverride reproduces the planned-targets run',
+  [pwSub.reason, pwSub.solution && pwSub.solution.comboCount],
+  [pwFull.reason, pwFull.solution && pwFull.solution.comboCount]);
+
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---
 const smoke = mk([[0,0,0,1,2,3],[1,2,3,4,5,0],[2,3,4,5,0,1],[3,4,5,0,1,2],[4,5,0,1,2,3]]);
 check('REG MatchFinder smoke score', new MatchFinder(smoke).calculateScore().score, 55);

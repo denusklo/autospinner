@@ -32,7 +32,12 @@
  *                                                # columns: required runes there must be
  *                                                # dragged out and dissolved; fewer than
  *                                                # 3 of a type on the board = provably
- *                                                # impossible (abort, no touch). Composes
+ *                                                # impossible: prints CLEAR_ALL_INFEASIBLE
+ *                                                # and interactively asks [y/N] whether to
+ *                                                # drop it and solve normally with every
+ *                                                # other flag intact (--force-partial-clear-all
+ *                                                # skips the prompt and auto-continues; default
+ *                                                # is abort, no touch, if not a TTY). Composes
  *                                                # with --first-combos/-runes, --sealed,
  *                                                # --start/--end. Clear-all alone CLUMPS the
  *                                                # required runes into one big group (1 combo);
@@ -44,6 +49,12 @@
  *                                                # --max-path ~60 (a long path does not help).
  *   node phone/autospin.js --beam 800            # wider beam search (default 200; slower, finds more)
  *   node phone/autospin.js --max-path 40         # longer drag budget (default 30 moves)
+ *   node phone/autospin.js --workers 4           # beam search shards across N worker threads
+ *                                                # (default: CPU cores - 1; P18). --workers 1 =
+ *                                                # exact sequential solve. Sharded results can
+ *                                                # differ slightly from sequential either way;
+ *                                                # for clear-all keep total --beam ~16000 so
+ *                                                # each shard stays wide enough (~1000+).
  *   node phone/autospin.js --move-ms 215         # ms per CELL move (decimals ok) — the direct,
  *                                                # fine speed knob. The game drops the rune below
  *                                                # a sharp cell-traversal time (~205ms on the
@@ -107,7 +118,8 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Board, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS, FROZEN } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, CELL_FLAGS, FROZEN } = require('../algorithm.js');
+const { solveDoraParallel, solveClearAllParallel, solveMaxFirstCombosParallel, defaultWorkers } = require('./parallel.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
 const ROWS = [1330, 1510, 1690, 1870, 2050];
@@ -586,6 +598,20 @@ function askEnter(msg) {
   });
 }
 
+// Defaults to NO (safe: preserves the old always-abort behavior unless the
+// User explicitly opts in) and skips the prompt entirely when stdin isn't a
+// TTY (scripted/piped runs) so an unattended run can't hang forever.
+function askYesNo(msg) {
+  if (!process.stdin.isTTY) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(msg, answer => {
+      rl.close();
+      resolve(/^y(es)?$/i.test(answer.trim()));
+    });
+  });
+}
+
 async function main() {
   const dry = process.argv.includes('--dry');
   const checkOnly = process.argv.includes('--check');
@@ -753,45 +779,66 @@ async function main() {
         + ' (strict: thorn-column runes must be dragged out and dissolved)');
       const dead = totals.filter(o => o.n > 0 && o.n < (isTwoMatch(o.t) ? 2 : 3));
       if (dead.length > 0) {
-        console.log('[TOS] ABORT=clear-all-infeasible ' + dead.map(o => `${TYPE_NAMES[o.t]}=${o.n}`).join(',')
-          + ' — too few of a type to ever form a dissolve group (2-match types need 2, others 3; no touch sent)');
-        return;
+        const deadDesc = dead.map(o => `${TYPE_NAMES[o.t]}=${o.n}`).join(',');
+        console.log('[TOS] CLEAR_ALL_INFEASIBLE=' + deadDesc
+          + ' — too few of a type to ever form a dissolve group (2-match types need 2, others 3)');
+        const force = process.argv.includes('--force-partial-clear-all');
+        const proceed = force || await askYesNo(
+          `[TOS] Continue and solve normally (drop ${deadDesc}, keep every other flag: start/end/first-combos/etc)? [y/N] `);
+        if (!proceed) {
+          console.log('[TOS] ABORT=clear-all-infeasible ' + deadDesc + ' (no touch sent)');
+          return;
+        }
+        const deadSet = new Set(dead.map(o => o.t));
+        for (let i = clearTypes.length - 1; i >= 0; i--) if (deadSet.has(clearTypes[i])) clearTypes.splice(i, 1);
+        console.log('[TOS] CLEAR_ALL_TYPES=' + (clearTypes.length ? clearTypes.map(t => TYPE_NAMES[t]).join(',') : 'none')
+          + ' (infeasible type(s) dropped; continuing with remaining constraints)');
       }
     }
+    // --workers N: shard the beam search across worker_threads (phone/
+    // parallel.js). Default = cores-1; 1 = exact sequential solve. The beam
+    // is PARTITIONED per worker (beamWidth/N each), so results can differ
+    // slightly from --workers 1 in either direction — wall time ~1/N.
+    const workers = Math.max(1, Number(argValue('--workers') ?? 0) || defaultWorkers());
+    console.log(`[TOS] WORKERS=${workers}` + (workers > 1 ? ` (beam sharded ~${Math.ceil(Number(argValue('--beam') ?? 200) / workers)}/worker; --workers 1 for exact sequential)` : ''));
     const t0 = Date.now();
     let sol, engine;
 
     if (minFirstRunes > 0) {
-      sol = new DoraSolver(board, {
+      sol = await solveDoraParallel(board, {
         beamWidth: Number(argValue('--beam') ?? 200),
         maxPath: Number(argValue('--max-path') ?? 30),
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstRunes, exactFirstRunes: exactRunesMode,
         startCells, endCell, fireRoute, twoMatch, clearTypes,
-      }).solve();
+      }, workers);
       engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
     } else if (maxMode) {
-      // Find the highest achievable first-wave count (bound -> planner -> baseline)
-      const res = solveMaxFirstCombos(board, {
+      // Find the highest achievable first-wave count (bound -> planner -> baseline).
+      // plannerBeamWidth capped like the clear-all escalation below: the
+      // router's objective is dense (L22 routed reliably at beam 300), so
+      // inheriting --beam 16000 here just makes each failed descent step
+      // (n=bound, bound-1, ...) cost tens of seconds for nothing.
+      const res = await solveMaxFirstCombosParallel(board, {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, priorityCells,
         beamWidth: Number(argValue('--beam') ?? 200),
         maxPath: Number(argValue('--max-path') ?? 30),
-        plannerBeamWidth: Math.max(300, Number(argValue('--beam') ?? 0)),
+        plannerBeamWidth: Math.min(Math.max(300, Number(argValue('--beam') ?? 0)), 2000),
         plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
         startCells, endCell, fireRoute, twoMatch, clearTypes,
-      });
+      }, workers);
       sol = res.solution;
       engine = `MaxFirstCombos(achieved=${res.achieved}/bound=${res.bound})`;
     } else {
-      sol = new DoraSolver(board, {
+      sol = await solveDoraParallel(board, {
         beamWidth: Number(argValue('--beam') ?? 200),
         maxPath: Number(argValue('--max-path') ?? 30),
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
         startCells, endCell, fireRoute, twoMatch, clearTypes,
-      }).solve();
+      }, workers);
       engine = 'DoraSolver';
     }
 
@@ -809,15 +856,24 @@ async function main() {
     // Guarantee escalation: if beam search misses the first-combo target OR a
     // clear-all demand, the planner constructs it (or proves it impossible).
     if (!maxMode && minFirstRunes === 0 && ((minFirstArg > 0 && missesTarget()) || clearAllMissed())) {
-      const plannerBeam = Math.max(300, Number(argValue('--beam') ?? 0));
+      // The router's objective is DENSE (cells-matched + distance potential),
+      // so it doesn't need DoraSolver-scale beams: L22 routed 8/8 end-pinned
+      // placements at beam 300. Inheriting --beam 16000 here made a failed
+      // escalation cost 35-60s; capped, a MISS costs a few seconds instead.
+      const plannerBeam = Math.min(Math.max(300, Number(argValue('--beam') ?? 0)), 2000);
       const plannerMaxPath = Math.max(60, Number(argValue('--max-path') ?? 0));
-      const planner = new TargetPlanner(board, {
+      const plannerOpts = {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
         minFirstCombos: minFirstArg, exact: exactMode,
         beamWidth: plannerBeam, maxPath: plannerMaxPath,
         startCells, endCell, fireRoute, twoMatch, clearTypes,
-      });
-      const planned = planner.solve();
+      };
+      // Clear-all coverage targets are independent routing problems — shard
+      // them across the same worker pool; the combo-target planner path
+      // stays sequential (it early-returns on the first routed target).
+      const planned = clearTypes.length
+        ? await solveClearAllParallel(board, plannerOpts, workers)
+        : new TargetPlanner(board, plannerOpts).solve();
       if (planned.solution) {
         sol = planned.solution;
         engine = clearTypes.length ? `TargetPlanner(clear-all,combos=${planned.solution.comboCount})` : `TargetPlanner(target#${planned.targetsTried})`;

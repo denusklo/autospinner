@@ -69,6 +69,12 @@
  *                                             # window; oldest releases as you advance).
  *                                             # --fire-route N sets the trail length. Composes
  *                                             # with all other flags; may reduce combos.
+ *   node phone/autospin.js --2-match=h,f      # named rune types dissolve at a run of TWO
+ *                                             # instead of three (boss); a 2-run counts as a
+ *                                             # full combo everywhere (scoring, first-wave
+ *                                             # counts, clear-all). Types NOT listed still
+ *                                             # need 3. Letters w/f/g/l/d/h or digits 0-5.
+ *                                             # Composes with every other flag.
  *   node phone/autospin.js --sealed 0,5       # force sealed columns; --sealed none disables
  *   node phone/autospin.js --shock-bases l    # set electric-rune base element(s) when the
  *                                             # bright glow defeats auto-detection: one letter
@@ -77,12 +83,18 @@
  *
  * Board file: 5 lines x 6 tokens (comma/space separated). Tokens: w=Water
  * f=Fire g=Wood(green) l=Light d=Dark h=Heart or digits 0-5. Suffixes
- * (combinable): `*` thorn/sealed-column marker, `!` frozen (cannot pick up or
+ * (combinable): `*` thorn/sealed-column marker, `!` locked (cannot pick up or
  * drag through: CELL_FLAGS NO_PICKUP|NO_SWAP), `x` this cell cannot dissolve
  * (CELL_FLAGS NO_DISSOLVE), `^` electric (P11: interrupts the drag if touched
  * or passed through, still dissolves with its base element, and clearing it
- * first-wave gets a big solver bonus — token g^ = electric Wood).
- * Example line:  f* l w! g^ h h*
+ * first-wave gets a big solver bonus — token g^ = electric Wood), `#` frozen
+ * (ice mechanic, P16: an ICED rune is fully normal — dissolvable — but if it
+ * survives a spin round it FREEZES for 3 rounds: can move / be dragged /
+ * pass-through, the ice travels WITH the rune, but it cannot dissolve until
+ * the freeze expires. `#` marks the FROZEN state, solved as the per-rune
+ * FROZEN value 6, not a positional flag. The dissolvable iced pre-state needs
+ * no marker — it plays as its base element).
+ * Example line:  f* l w! g^ h f#
  *
  * Sealed columns (special-card mode): thorn-overlaid runes mark columns that
  * cannot dissolve but can be dragged through. Auto-detected from the thorn
@@ -95,7 +107,7 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Board, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS, FROZEN } = require('../algorithm.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
 const ROWS = [1330, 1510, 1690, 1870, 2050];
@@ -128,6 +140,20 @@ const SIGNATURES = [
   { type: 5, thorn: false, rgb: [253, 183, 204] }, // Heart enhanced (white sparkle)
   { type: 0, thorn: false, electric: true, rgb: [172, 248, 247] }, // Electric rune (flicker phase A)
   { type: 0, thorn: false, electric: true, rgb: [191, 251, 250] }, // Electric rune (flicker phase B)
+  // FROZEN rune (ice mechanic, P16). Two states: an ICED rune is fully normal
+  // and dissolvable (dissolve it that round or it freezes!); if it survives a
+  // spin round it becomes FROZEN for 3 rounds — can move/drag/pass-through
+  // (the ice travels WITH the rune) but cannot dissolve. This signature is
+  // the FROZEN white-crystal shell, whose appearance CHANGES each of its 3
+  // rounds — later-round shells and the dissolvable iced look are UNMEASURED
+  // (unknown-guard will refuse and print rgb to add here). The shell fully
+  // masks the base element: all 5 frozen cells on the live board read an
+  // identical (176,171,210) regardless of base (Fire underneath per the
+  // User). Frame-stable (delta 0) and NOT an electric-glow candidate (only b
+  // clears its threshold). main() puts the per-rune FROZEN value (6) on the
+  // solver board instead of a positional flag; the placeholder type here is
+  // display-only. Measured live 2026-07-08.
+  { type: 1, thorn: false, frozen: true, rgb: [176, 171, 210] },     // Frozen (shell, round 1 of 3)
   { type: 0, thorn: true, rgb: [70, 98, 119] },    // Water + thorn
   { type: 1, thorn: true, rgb: [129, 61, 53] },    // Fire + thorn
   { type: 2, thorn: true, rgb: [59, 116, 62] },    // Wood + thorn
@@ -141,7 +167,7 @@ const TYPE_LETTERS = ['w', 'f', 'g', 'l', 'd', 'h'];
 const TYPE_CSS = ['#44a0e0', '#e03020', '#30c040', '#d0a020', '#a040d0', '#e060a0'];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const cellLabel = c => (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '')) + (c.thorn ? '*' : '');
+const cellLabel = c => (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.frozen ? '#' : '')) + (c.thorn ? '*' : '');
 
 // ---------- capture + recognition ----------
 
@@ -204,7 +230,7 @@ function classify(stats, skipGlow = false) {
   // Two independent thorn signals: nearest signature + dark-pixel share (P5).
   // Trust the dark-pixel metric when they disagree.
   const thorn = stats.darkPct > 0.2;
-  return { type: best.type, thorn, electric: best.electric ?? false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+  return { type: best.type, thorn, electric: best.electric ?? false, frozen: best.frozen ?? false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
 }
 
 /**
@@ -373,18 +399,19 @@ function readBoardFromFile(file) {
     const tokens = line.split(/[\s,]+/).filter(Boolean);
     if (tokens.length !== 6) throw new Error(`row ${gy} needs 6 cells, got ${tokens.length}`);
     return tokens.map((tok, gx) => {
-      let core = tok.toLowerCase(), thorn = false, electric = false, flags = 0;
-      while (/[*!x^]$/.test(core)) {
+      let core = tok.toLowerCase(), thorn = false, electric = false, frozen = false, flags = 0;
+      while (/[*!x^#]$/.test(core)) {
         const s = core.slice(-1);
         if (s === '*') thorn = true;
         if (s === '!') flags |= CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
         if (s === 'x') flags |= CELL_FLAGS.NO_DISSOLVE;
         if (s === '^') electric = true;
+        if (s === '#') frozen = true; // flags added in main(), same as electric
         core = core.slice(0, -1);
       }
       const type = /^[0-5]$/.test(core) ? Number(core) : TYPE_LETTERS.indexOf(core);
       if (type === -1) throw new Error(`bad token "${tok}" at (${gx},${gy})`);
-      return { type, thorn, electric, flags, dist: 0, rgb: null, darkPct: null };
+      return { type, thorn, electric, frozen, flags, dist: 0, rgb: null, darkPct: null };
     });
   });
 }
@@ -504,7 +531,7 @@ function writeCheckHtml(cells, sealedCols, outFile) {
       const suspect = c.dist > MAX_SIG_DIST;
       const left = (COLS[gx] - 90) * SCALE, top = (ROWS[gy] - 90) * SCALE, size = 180 * SCALE;
       overlays += `<div class="cell${suspect ? ' suspect' : ''}" style="left:${left}px;top:${top}px;width:${size}px;height:${size}px;border-color:${TYPE_CSS[c.type]}">` +
-        `<span style="background:${TYPE_CSS[c.type]}">${TYPE_NAMES[c.type]}${c.thorn ? '*' : ''}</span>` +
+        `<span style="background:${TYPE_CSS[c.type]}">${TYPE_NAMES[c.type]}${c.electric ? '^' : ''}${c.frozen ? '#' : ''}${c.thorn ? '*' : ''}</span>` +
         `<small>d=${c.dist.toFixed(0)}</small></div>`;
     }
   }
@@ -628,7 +655,9 @@ async function main() {
     }
 
     const board = new Board();
-    board.fromArray(cells.map(row => row.map(c => c.type)));
+    // Frozen runes go onto the solver board as the per-rune FROZEN value: they
+    // drag/swap/fall like any rune (ice travels with them) but never match.
+    board.fromArray(cells.map(row => row.map(c => (c.frozen ? FROZEN : c.type))));
     // Electric runes (P11): cannot be picked up or dragged through (interrupt
     // the spin) but DO dissolve with their base element — and clearing them is
     // top priority (they block attacking until dissolved).
@@ -641,6 +670,12 @@ async function main() {
       }
       return f;
     }));
+    // Frozen runes (P16) are NOT flagged: they are draggable and pass-through
+    // (User confirmed), and the ice travels with the rune — handled by the
+    // per-rune FROZEN board value above, which positional flags can't model.
+    const frozenList = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.frozen) frozenList.push(`${gx},${gy}`); }));
+    if (frozenList.length) console.log('[TOS] FROZEN_CELLS=' + frozenList.join(' ') + ' (draggable/pass-through, never dissolve; ice travels with the rune)');
     const hasFlags = flagGrid.some(row => row.some(v => v !== 0));
     if (hasFlags) console.log('[TOS] CELL_FLAGS_ROWS=' + flagGrid.map(r => r.join('')).join('|'));
 
@@ -650,7 +685,7 @@ async function main() {
     const startCell = argCell('--start');
     const endCell = argCell('--end');
     if (startCell && (flagGrid[startCell.y][startCell.x] & (CELL_FLAGS.NO_PICKUP))) {
-      console.log(`[TOS] ABORT=start-unpickable start=${startCell.x},${startCell.y} is electric/frozen (NO_PICKUP) — the game can't lift it; pick another --start (no touch sent)`);
+      console.log(`[TOS] ABORT=start-unpickable start=${startCell.x},${startCell.y} is electric/locked (NO_PICKUP) — the game can't lift it; pick another --start (no touch sent)`);
       return;
     }
     const startCells = startCell ? [startCell] : null;
@@ -667,6 +702,20 @@ async function main() {
       fireRoute = (Number.isInteger(n) && n > 0) ? n : 6;
       console.log(`[TOS] FIRE_ROUTE=${fireRoute} (last ${fireRoute} cells left behind stay on fire; no re-entry)`);
     }
+    // --2-match=h,f : rune types that dissolve at a run of TWO instead of three
+    // (boss mechanic). A 2-run of such a type counts as a full combo everywhere
+    // (scoring, first-wave counts, clear-all). Everything else still needs 3.
+    const twoMatchArg = argValue('--2-match');
+    const twoMatch = twoMatchArg ? [...new Set(twoMatchArg.split(',').filter(Boolean).map(s => {
+      const tok = s.trim().toLowerCase();
+      const t = /^[0-5]$/.test(tok) ? Number(tok)
+        : TYPE_LETTERS.indexOf(tok) !== -1 ? TYPE_LETTERS.indexOf(tok)
+        : TYPE_NAMES.map(n => n.toLowerCase()).indexOf(tok);
+      if (t === -1) throw new Error(`--2-match: unknown rune type "${s.trim()}" (use ${TYPE_NAMES.join('/')}, ${TYPE_LETTERS.join('/')}, or 0-5)`);
+      return t;
+    }))] : null;
+    const isTwoMatch = t => twoMatch !== null && twoMatch.includes(t);
+    if (twoMatch) console.log(`[TOS] TWO_MATCH=${twoMatch.map(t => TYPE_NAMES[t]).join(',')} (dissolve at a run of 2)`);
     // --first-combos N = EXACTLY N; --first-combos N+ = at least N;
     // --first-combos max = highest achievable. --first-min-combos N stays
     // as a backward-compatible alias for N+.
@@ -696,13 +745,16 @@ async function main() {
       return t;
     }))];
     if (clearTypes.length > 0) {
-      const totals = clearTypes.map(t => ({ t, n: cells.flat().filter(c => c.type === t).length }));
+      // Exclude frozen cells: their .type is a display placeholder — on the
+      // solver board they are FROZEN and can never dissolve, so they are not
+      // part of a clear-all demand (they melt in a later round).
+      const totals = clearTypes.map(t => ({ t, n: cells.flat().filter(c => c.type === t && !c.frozen).length }));
       console.log('[TOS] CLEAR_ALL_TARGET=' + totals.map(o => `${TYPE_NAMES[o.t]}:${o.n}`).join(',')
         + ' (strict: thorn-column runes must be dragged out and dissolved)');
-      const dead = totals.filter(o => o.n > 0 && o.n < 3);
+      const dead = totals.filter(o => o.n > 0 && o.n < (isTwoMatch(o.t) ? 2 : 3));
       if (dead.length > 0) {
         console.log('[TOS] ABORT=clear-all-infeasible ' + dead.map(o => `${TYPE_NAMES[o.t]}=${o.n}`).join(',')
-          + ' — fewer than 3 of a type can never form a dissolve group (no touch sent)');
+          + ' — too few of a type to ever form a dissolve group (2-match types need 2, others 3; no touch sent)');
         return;
       }
     }
@@ -716,7 +768,7 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstRunes, exactFirstRunes: exactRunesMode,
-        startCells, endCell, fireRoute, clearTypes,
+        startCells, endCell, fireRoute, twoMatch, clearTypes,
       }).solve();
       engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
     } else if (maxMode) {
@@ -727,7 +779,7 @@ async function main() {
         maxPath: Number(argValue('--max-path') ?? 30),
         plannerBeamWidth: Math.max(300, Number(argValue('--beam') ?? 0)),
         plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
-        startCells, endCell, fireRoute, clearTypes,
+        startCells, endCell, fireRoute, twoMatch, clearTypes,
       });
       sol = res.solution;
       engine = `MaxFirstCombos(achieved=${res.achieved}/bound=${res.bound})`;
@@ -738,7 +790,7 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
-        startCells, endCell, fireRoute, clearTypes,
+        startCells, endCell, fireRoute, twoMatch, clearTypes,
       }).solve();
       engine = 'DoraSolver';
     }
@@ -749,7 +801,7 @@ async function main() {
     // constructive coverage planner (which CAN, unlike a wider beam).
     const clearAllMissed = () => {
       if (clearTypes.length === 0) return false;
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null });
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch });
       const totalsByType = t => board.grid.reduce((n, row) => n + row.filter(v => v === t).length, 0);
       return clearTypes.some(t => sim.firstClearedByType[t] < totalsByType(t));
     };
@@ -763,7 +815,7 @@ async function main() {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
         minFirstCombos: minFirstArg, exact: exactMode,
         beamWidth: plannerBeam, maxPath: plannerMaxPath,
-        startCells, endCell, fireRoute, clearTypes,
+        startCells, endCell, fireRoute, twoMatch, clearTypes,
       });
       const planned = planner.solve();
       if (planned.solution) {
@@ -799,7 +851,7 @@ async function main() {
     // board's counts); "trapped" = required runes the drag LEFT in sealed /
     // no-dissolve cells, which is why the demand failed there.
     if (clearTypes.length > 0) {
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null });
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch });
       const detail = [], unmet = [];
       for (const t of clearTypes) {
         let total = 0, trapped = 0;

@@ -1,7 +1,7 @@
 // Regression + verification suite for algorithm.js (run: `node verify.js`)
 // This is the canonical check required by CLAUDE.md R2 before shipping any
 // algorithm.js change. Exit code 0 = all pass.
-const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS} =
+const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS, FROZEN} =
   require('./algorithm.js');
 
 let failures = 0;
@@ -495,6 +495,104 @@ const frClear = new DoraSolver(mk([[4,0,1,2,3,5],[4,1,2,3,5,0],[4,2,3,5,0,1],[0,
 check('FR + clear-all: all Darks cleared',
   BoardSimulator.resolve(frClear.board).firstClearedByType[4], 4);
 check('FR + clear-all: path fire-legal', fireRouteInvariant(frClear.path, 6), true);
+
+// --- Frozen runes (P16): per-rune FROZEN value 6 — moves/falls like any rune,
+// --- never matches. Draggable and pass-through (User confirmed).
+// IC1: 3 frozen in a row are NOT a combo, and an frozen rune between two same-
+// color runes keeps them from ever being one run.
+const icRow = mk([
+  [FROZEN,FROZEN,FROZEN,1,2,3],
+  [1,2,3,4,5,0],
+  [2,3,4,5,0,1],
+  [3,4,5,0,1,2],
+  [4,5,0,1,2,3],
+]);
+check('IC1 3 frozen in a row = 0 groups', BoardSimulator.findComboGroups(icRow).length, 0);
+
+// IC2: frozen runes FALL with gravity after a clear beneath them (the ice
+// travels with the rune — per-rune, not positional). Clear the bottom row of
+// col 0-2 via a horizontal triple; the frozen rune above col 0 must land.
+const icFall = mk([
+  [FROZEN,1,2,3,4,5],
+  [2,3,4,5,0,1],
+  [3,4,5,0,1,2],
+  [5,2,3,4,5,0],
+  [0,0,0,1,2,3],
+]);
+const icSim = BoardSimulator.resolve(icFall);
+check('IC2 triple under frozen still clears', icSim.totalCombos >= 1, true);
+// col 0 lost exactly its bottom cell, so the frozen rune at (0,0) falls one row
+check('IC2 frozen rune fell one row with gravity', icSim.boardAfter.get(0, 1), FROZEN);
+check('IC2 frozen origin cell now empty', icSim.boardAfter.get(0, 0), -1);
+
+// IC3: DoraSolver drags on a frozen board stay honest, and an frozen cell may be
+// entered by the path (pass-through / draggable). Board seeded with frozen
+// scattered among matchable colors.
+const icBoard = mk([
+  [3,3,5,5,2,4],
+  [5,4,4,2,0,3],
+  [2,FROZEN,0,3,0,2],
+  [3,0,0,FROZEN,2,3],
+  [2,FROZEN,3,5,FROZEN,FROZEN],
+]);
+const icSol = new DoraSolver(icBoard, {beamWidth: 400, maxPath: 24}).solve();
+check('IC3 solver finds combos on a frozen board', icSol.comboCount > 0, true);
+check('IC3 combo count honest vs independent resolve',
+  BoardSimulator.resolve(icSol.board).totalCombos, icSol.comboCount);
+check('IC3 no frozen rune dissolved (6 frozen conserved on final board)',
+  icSol.board.grid.flat().filter(v => v === FROZEN).length, 5);
+
+// IC4: solveMaxFirstCombos color/geometry bounds ignore frozen runes — a board
+// of 27 frozen + one water triple bounds at exactly 1 (not 27/3 phantom combos).
+const icBound = mk([
+  [FROZEN,FROZEN,FROZEN,FROZEN,FROZEN,FROZEN],
+  [FROZEN,FROZEN,FROZEN,FROZEN,FROZEN,FROZEN],
+  [FROZEN,FROZEN,FROZEN,FROZEN,FROZEN,FROZEN],
+  [FROZEN,FROZEN,FROZEN,FROZEN,FROZEN,FROZEN],
+  [0,0,0,FROZEN,FROZEN,FROZEN],
+]);
+check('IC4 max-first-combos bound ignores frozen', solveMaxFirstCombos(icBound, {beamWidth: 50, maxPath: 8}).bound, 1);
+
+// IC5: pairPotential ignores adjacent frozen pairs (no phantom steering) —
+// icBound has 20+ adjacent frozen pairs and exactly 2 water pairs.
+check('IC5 pairPotential counts only real pairs', new DoraSolver(icBound).pairPotential(icBound), 2);
+
+// IC6: clear-all totals exclude frozen (an frozen rune of the demanded element is
+// not owed this turn). 3 normal Hearts + 2 frozen: demand = 3 and is met.
+const icClear = mk([
+  [5,1,2,3,4,0],
+  [2,3,4,0,1,2],
+  [5,4,0,1,2,3],
+  [5,0,1,2,3,4],
+  [FROZEN,FROZEN,3,4,0,1],
+]);
+const icCA = new DoraSolver(icClear, {clearTypes: [5], beamWidth: 600, maxPath: 24});
+check('IC6 clearTypeTotals exclude frozen', icCA.clearTypeTotals[5], 3);
+const icCASol = icCA.solve();
+check('IC6 clear-all met with frozen same-element present',
+  BoardSimulator.resolve(icCASol.board).firstClearedByType[5] >= 3, true);
+
+// --- 2-match: named types dissolve at a run of 2 instead of 3 (boss) ---
+// Board with a Heart pair (0,0)(1,0) and a Water pair (3,0)(4,0), no triples.
+const tmBoard = mk([[5,5,0,0,2,3],[1,2,3,4,1,2],[2,3,4,1,2,3],[3,4,1,2,3,4],[4,1,2,3,4,1]]);
+check('TM no 2-match: a pair does not dissolve', BoardSimulator.findComboGroups(tmBoard).length, 0);
+check('TM 2-match Heart: the Heart pair becomes a group of 2',
+  BoardSimulator.findComboGroups(tmBoard, [], null, [5]).filter(g => g.type === 5 && g.cells.length === 2).length, 1);
+check('TM 2-match Water only: Heart pair still does NOT match',
+  BoardSimulator.findComboGroups(tmBoard, [], null, [0]).some(g => g.type === 5), false);
+const tmRes = BoardSimulator.resolve(tmBoard, {twoMatch: [5]});
+check('TM resolve: a 2-match pair = 1 combo, 2 runes', [tmRes.totalCombos, tmRes.firstRunes], [1, 2]);
+// A run of 3 of a non-2-match type still dissolves (baseline unchanged)
+check('TM others still need 3 (Water triple dissolves)',
+  BoardSimulator.findComboGroups(mk([[0,0,0,1,2,3],[1,2,3,4,5,0],[2,3,4,5,0,1],[3,4,5,0,1,2],[4,5,0,1,2,3]]), [], null, [5]).some(g => g.type === 0), true);
+// DoraSolver exploits 2-match for more combos, and stays honest under composition
+const tmSolBoard = () => mk([[5,0,5,1,2,3],[0,5,0,2,3,4],[1,2,3,4,5,0],[2,3,4,5,0,1],[3,4,5,0,1,2]]);
+const tmOn = new DoraSolver(tmSolBoard(), {beamWidth: 400, maxPath: 20, twoMatch: [5]}).solve();
+check('TM DoraSolver solution honest vs independent 2-match resolve',
+  BoardSimulator.resolve(tmOn.board, {twoMatch: [5]}).totalCombos, tmOn.comboCount);
+const tmFire = new DoraSolver(tmSolBoard(), {beamWidth: 400, maxPath: 20, twoMatch: [5], fireRoute: 6}).solve();
+check('TM composes with fire-route (path fire-legal + honest)',
+  fireRouteInvariant(tmFire.path, 6) && BoardSimulator.resolve(tmFire.board, {twoMatch: [5]}).totalCombos === tmFire.comboCount, true);
 
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---
 const smoke = mk([[0,0,0,1,2,3],[1,2,3,4,5,0],[2,3,4,5,0,1],[3,4,5,0,1,2],[4,5,0,1,2,3]]);

@@ -159,3 +159,10 @@
 - Lesson: a "construct then route" planner is viable ONLY if the target is MINIMAL (cover the demand, nothing more) — every extra target cell multiplies routing difficulty, especially under an end pin. And before declaring a feature dead, isolate WHY it fails with a direct probe (routeToTarget on a hand-built minimal target succeeded in 2s — that single experiment overturned "the planner can't do it"). L20's beam-first advice is still the fast path for mildly-scattered types; the planner is the fallback the tool now takes automatically.
 - Evidence: scratchpad water-gather.js/water-gather-pin.js (bare 5-line routes 5/5 in ~2s, 8/8 placements with end pin), debug-planner.js (found the clearAllComboFloor=5 bug), planner-water.js + CLI dry-run (5/5, 3 combos, end 5,0). verify.js CA1-CA3.
 - Affected files: algorithm.js TargetPlanner.linePlacements/partitionCount/coverageSets/planClearAllTargets/solveClearAll + clearAllComboFloor + solve() dispatch; phone/autospin.js clear-all escalation + abort hint; PROJECT-FACTS P14; verify.js CA1-CA3.
+
+## L23 2026-07-08 Git Bash mangles `/sdcard/...` adb arguments into Windows paths — use PowerShell (or Node execSync) for adb shell commands
+- Symptom: `adb shell screencap -p /sdcard/x.png` run via the Bash tool printed screencap's usage/help and exited 1, as if the flag parsing broke.
+- Root cause: MSYS/Git Bash path conversion rewrites POSIX-looking arguments (`/sdcard/x.png` → `C:/Program Files/Git/sdcard/x.png`) before adb sees them; the embedded space splits it into extra args on the device side. The same command works from PowerShell and from Node's execSync (phone/autospin.js) because neither converts paths.
+- Lesson: on this machine, run adb commands with device-side paths from PowerShell, not the Bash tool (or prefix `MSYS_NO_PATHCONV=1` if Bash is unavoidable). Companion to L7 (never redirect adb binary stdout through PowerShell `>`): between the two, the safe recipe is PowerShell + `adb pull`, exactly what autospin.js's captureRaw does.
+- Evidence: identical screencap command failed under Bash tool, succeeded under PowerShell, 2026-07-08.
+- Affected files: none (tooling pitfall only).

@@ -4,7 +4,7 @@
  * Per-cell constraint flags for real-game board effects (PROJECT-FACTS P9).
  * Passed as a 5x6 bitmask grid `flags[y][x]`; flags are POSITIONAL — they
  * stay with the cell, not the rune (matches the sealed-column observation;
- * a future per-rune travelling effect needs a different mechanism).
+ * per-rune travelling effects use a different mechanism — see FROZEN below).
  * Combine freely: e.g. a frozen rune = NO_PICKUP | NO_SWAP.
  */
 const CELL_FLAGS = {
@@ -12,6 +12,22 @@ const CELL_FLAGS = {
   NO_PICKUP: 2,   // rune cannot be grabbed as the held rune
   NO_SWAP: 4,     // cell cannot be entered/displaced by a drag path
 };
+
+/**
+ * Frozen rune (PROJECT-FACTS P16 ice mechanic): a PER-RUNE travelling effect,
+ * unlike the positional CELL_FLAGS above. In-game an ICED rune is fully
+ * normal and dissolvable, but if it survives a spin round it FREEZES for 3
+ * rounds. A frozen rune moves, swaps, and falls like any other rune (the ice
+ * shell travels WITH it) but never joins a match group until the freeze
+ * expires (between turns — so within one solve it simply never dissolves).
+ * Modeled as a 7th rune value on the board grid: excluded from run scans,
+ * pair potential, and color-count bounds. Its base element is irrelevant
+ * while frozen. (The dissolvable iced pre-state needs no special value — it
+ * plays as its base element.) Only BoardSimulator / DoraSolver /
+ * TargetPlanner understand this value — never feed frozen boards to the
+ * legacy solvers (MatchFinder etc.), which would match 6s as a color.
+ */
+const FROZEN = 6;
 
 /**
  * Fire-route constraint (AutoDora spec §4.4, "--fire-route"): every cell the
@@ -900,24 +916,29 @@ class BoardSimulator {
    *   cells break runs and never join groups.
    * @param {number[][]|null} flags per-cell CELL_FLAGS bitmask grid; cells
    *   with NO_DISSOLVE behave like sealed cells. Composes with sealedColumns.
+   * @param {Iterable<number>|null} twoMatch rune types that dissolve at a run of
+   *   TWO instead of three (boss mechanic, `--2-match`). Everything else needs 3.
    * @returns {Array<{type: number, cells: Array<[number, number]>}>}
    */
-  static findComboGroups(board, sealedColumns = [], flags = null) {
+  static findComboGroups(board, sealedColumns = [], flags = null, twoMatch = null) {
     const w = board.width, h = board.height;
     const sealed = new Set(sealedColumns);
+    const two = twoMatch instanceof Set ? twoMatch : new Set(twoMatch || []);
+    const minRun = t => two.has(t) ? 2 : 3; // dissolve threshold for this type
     const blocked = (x, y) => sealed.has(x) ||
       (flags !== null && (flags[y][x] & CELL_FLAGS.NO_DISSOLVE) !== 0);
     const marked = Array.from({length: h}, () => Array(w).fill(false));
 
-    // Row scan: mark maximal runs of 3+ (advance past each run — no double count)
+    // Row scan: mark maximal runs meeting the type's threshold (advance past
+    // each run — no double count)
     for (let y = 0; y < h; y++) {
       let x = 0;
       while (x < w) {
         const type = board.get(x, y);
-        if (type === -1 || blocked(x, y)) { x++; continue; }
+        if (type === -1 || type === FROZEN || blocked(x, y)) { x++; continue; }
         let end = x + 1;
         while (end < w && !blocked(end, y) && board.get(end, y) === type) end++;
-        if (end - x >= 3) {
+        if (end - x >= minRun(type)) {
           for (let i = x; i < end; i++) marked[y][i] = true;
         }
         x = end;
@@ -930,10 +951,10 @@ class BoardSimulator {
       let y = 0;
       while (y < h) {
         const type = board.get(x, y);
-        if (type === -1 || blocked(x, y)) { y++; continue; }
+        if (type === -1 || type === FROZEN || blocked(x, y)) { y++; continue; }
         let end = y + 1;
         while (end < h && !blocked(x, end) && board.get(x, end) === type) end++;
-        if (end - y >= 3) {
+        if (end - y >= minRun(type)) {
           for (let i = y; i < end; i++) marked[i][x] = true;
         }
         y = end;
@@ -980,13 +1001,14 @@ class BoardSimulator {
   static resolve(board, options = {}) {
     const sealedColumns = options.sealedColumns ?? [];
     const flags = options.flags ?? null;
+    const twoMatch = options.twoMatch ?? null;
     const work = board.clone();
     let totalCombos = 0, firstCombos = 0, firstRunes = 0, chains = 0;
     const firstClearedByType = Array(6).fill(0);
     const allGroups = [];
 
     while (true) {
-      const groups = BoardSimulator.findComboGroups(work, sealedColumns, flags);
+      const groups = BoardSimulator.findComboGroups(work, sealedColumns, flags, twoMatch);
       if (groups.length === 0) break;
       chains++;
       if (chains === 1) {
@@ -1079,6 +1101,9 @@ class DoraSolver {
     // not re-enter any of the last `fireRoute` cells it left (self-avoiding
     // within a sliding window). Orthogonal to scoring; composes with everything.
     this.fireRoute = options.fireRoute ?? 0;
+    // Rune types that dissolve at a run of 2 instead of 3 (boss `--2-match`).
+    // Threaded into every BoardSimulator.resolve so scoring/combos reflect it.
+    this.twoMatch = options.twoMatch ?? null;
     // First-wave CLEAR-ALL demand (boss "首批消除所有X符石"): every rune of
     // each listed type must dissolve in the FIRST wave. Required count per
     // type = its total count on the input board (drags conserve runes), so
@@ -1091,7 +1116,10 @@ class DoraSolver {
     this.clearTypeTotals = Array(6).fill(0);
     if (this.clearTypes.length > 0) {
       for (let y = 0; y < board.height; y++) {
-        for (let x = 0; x < board.width; x++) this.clearTypeTotals[board.get(x, y)]++;
+        for (let x = 0; x < board.width; x++) {
+          const v = board.get(x, y);
+          if (v >= 0 && v < FROZEN) this.clearTypeTotals[v]++; // frozen runes can't dissolve — never owed
+        }
       }
     }
     // TUNABLE (spec §9: exact values unpublished). colorWeights indexed by
@@ -1143,7 +1171,7 @@ class DoraSolver {
       for (let x = 0; x < board.width; x++) {
         if (nd(x, y)) continue;
         const t = board.get(x, y);
-        if (t === -1) continue;
+        if (t === -1 || t === FROZEN) continue; // frozen pairs can never become a group
         if (types !== null && !types.includes(t)) continue;
         if (x + 1 < board.width && !nd(x + 1, y) && board.get(x + 1, y) === t) pairs++;
         if (y + 1 < board.height && !nd(x, y + 1) && board.get(x, y + 1) === t) pairs++;
@@ -1174,7 +1202,7 @@ class DoraSolver {
    * Spec §2 Step 5 (calculateWeight), on the fully-resolved cascade result.
    */
   calculateWeight(board) {
-    const sim = BoardSimulator.resolve(board, {sealedColumns: this.sealedColumns, flags: this.flags});
+    const sim = BoardSimulator.resolve(board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch});
     const t = this.tunable;
     let weight = 0;
     for (const g of sim.groups) {
@@ -1381,6 +1409,7 @@ class TargetPlanner {
     this.startCells = options.startCells ?? null;
     this.endCell = options.endCell ?? null;
     this.fireRoute = options.fireRoute ?? 0; // see fireBlocked
+    this.twoMatch = options.twoMatch ?? null; // types dissolving at run of 2
     // Clear-all-of-type demand, VERIFICATION-ONLY here: phase 1 targets
     // first-wave combo count, not required-type coverage, so routed targets
     // violating clearTypes are rejected rather than constructed. DoraSolver's
@@ -1390,7 +1419,10 @@ class TargetPlanner {
     this.clearTypeTotals = Array(6).fill(0);
     if (this.clearTypes.length > 0) {
       for (let y = 0; y < board.height; y++) {
-        for (let x = 0; x < board.width; x++) this.clearTypeTotals[board.get(x, y)]++;
+        for (let x = 0; x < board.width; x++) {
+          const v = board.get(x, y);
+          if (v >= 0 && v < FROZEN) this.clearTypeTotals[v]++;
+        }
       }
     }
   }
@@ -1429,7 +1461,8 @@ class TargetPlanner {
     const counts = Array(6).fill(0);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        if (this.movable(x, y)) counts[this.board.get(x, y)]++;
+        const v = this.board.get(x, y);
+        if (this.movable(x, y) && v >= 0 && v < FROZEN) counts[v]++;
       }
     }
 
@@ -1708,7 +1741,7 @@ class TargetPlanner {
       tried++;
       const route = this.routeToTarget(target);
       if (route === null) continue;
-      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags});
+      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch});
       if (this.clearTypes.some(t => sim.firstClearedByType[t] < this.clearTypeTotals[t])) continue;
       if (this.clearAllComboFloor > 0 && (this.exact ? sim.firstCombos !== this.clearAllComboFloor : sim.firstCombos < this.clearAllComboFloor)) continue;
       if (sim.totalCombos > bestCombos) {
@@ -1738,7 +1771,7 @@ class TargetPlanner {
       tried++;
       const route = this.routeToTarget(target);
       if (route === null) continue;
-      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags});
+      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch});
       // reject accidental merges/extras (exact) or shortfalls (both modes)
       if (this.exact ? sim.firstCombos !== this.target : sim.firstCombos < this.target) continue;
       // reject routes that violate a clear-all-of-type demand
@@ -1773,6 +1806,7 @@ function solveMaxFirstCombos(board, options = {}) {
   const startCells = options.startCells ?? null;
   const endCell = options.endCell ?? null;
   const fireRoute = options.fireRoute ?? 0;
+  const twoMatch = options.twoMatch ?? null;
   const clearTypes = options.clearTypes ?? [];
   const flag = (x, y) => flags === null ? 0 : flags[y][x];
 
@@ -1780,8 +1814,9 @@ function solveMaxFirstCombos(board, options = {}) {
   let resolvableCells = 0;
   for (let y = 0; y < board.height; y++) {
     for (let x = 0; x < board.width; x++) {
-      if ((flag(x, y) & CELL_FLAGS.NO_SWAP) === 0) counts[board.get(x, y)]++;
-      if (!sealedColumns.includes(x)
+      const v = board.get(x, y);
+      if ((flag(x, y) & CELL_FLAGS.NO_SWAP) === 0 && v >= 0 && v < FROZEN) counts[v]++;
+      if (!sealedColumns.includes(x) && v !== FROZEN
           && (flag(x, y) & (CELL_FLAGS.NO_DISSOLVE | CELL_FLAGS.NO_SWAP)) === 0) resolvableCells++;
     }
   }
@@ -1791,7 +1826,7 @@ function solveMaxFirstCombos(board, options = {}) {
   const dora = new DoraSolver(board, {
     beamWidth: options.beamWidth ?? 200, maxPath: options.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: options.priorityCells ?? [], startCells, endCell, fireRoute, clearTypes,
+    priorityCells: options.priorityCells ?? [], startCells, endCell, fireRoute, twoMatch, clearTypes,
   }).solve();
   let best = dora, achieved = dora.firstCombos;
 
@@ -1800,7 +1835,7 @@ function solveMaxFirstCombos(board, options = {}) {
       sealedColumns, flags, minFirstCombos: n,
       beamWidth: options.plannerBeamWidth ?? 300,
       maxPath: options.plannerMaxPath ?? 60,
-      startCells, endCell, fireRoute, clearTypes,
+      startCells, endCell, fireRoute, twoMatch, clearTypes,
     }).solve();
     if (res.solution) { best = res.solution; achieved = n; break; }
   }
@@ -1809,5 +1844,5 @@ function solveMaxFirstCombos(board, options = {}) {
 
 // Export for use in content script
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS};
+  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS, FROZEN};
 }

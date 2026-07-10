@@ -29,6 +29,10 @@ const CELL_FLAGS = {
  */
 const FROZEN = 6;
 
+// Attribute rune types (屬性珠): every element except Heart. Used by the
+// first-wave attribute-combo target (首消N屬) for steering/qualification.
+const ATTR_TYPES = [0, 1, 2, 3, 4];
+
 /**
  * Shielded rune (PROJECT-FACTS P24, corrected 2026-07-10 — see P30/L40): a
  * PER-RUNE travelling status, same family as FROZEN above (travels WITH the
@@ -48,9 +52,28 @@ const FROZEN = 6;
  * (is this specific cell shielded right now), use `isShielded()`.
  */
 const SHIELD_BASE = 7;
-const SHIELD_TYPE_OF = [0, 1, 2, 3, 4, 5, FROZEN, 0, 1, 2, 3, 4, 5];
-function baseType(v) { return v >= 0 ? SHIELD_TYPE_OF[v] : v; }
-function isShielded(v) { return v >= SHIELD_BASE; }
+
+/**
+ * Cursed rune (PROJECT-FACTS P37, corrected P38: originally modeled
+ * POSITIONALLY like the fire-hazard mechanic — WRONG, per live User
+ * correction: "the curse badge will follow the rune unlike fire-hazard
+ * mechanic"). Same PER-RUNE travelling family as shield/FROZEN above, so it
+ * needs the same in-band board-value trick. UNLIKE shield (a per-COLOR count
+ * floor), a cursed rune's rule is a hard per-INSTANCE "never": it matches
+ * and dissolves completely normally (joins runs with plain runes of the
+ * same color), but a board where a cursed cell's rune actually gets swept
+ * into ANY wave's dissolving group is simply forbidden as an answer — same
+ * "matches normally, reject the outcome" posture as the ORIGINAL
+ * hazardPositions fix (P22/P23/L34), just tracked by RUNE IDENTITY (this
+ * board value) instead of a fixed board COORDINATE, since the User confirmed
+ * this effect travels with the dragged rune through swaps/gravity, a plain
+ * position Set cannot follow that.
+ */
+const CURSE_BASE = 13;
+const TYPE_OF_TABLE = [0, 1, 2, 3, 4, 5, FROZEN, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5];
+function baseType(v) { return v >= 0 ? TYPE_OF_TABLE[v] : v; }
+function isShielded(v) { return v >= SHIELD_BASE && v < CURSE_BASE; }
+function isCursed(v) { return v >= CURSE_BASE; }
 
 // Reusable scratch buffers for BoardSimulator.findComboGroups (hot path:
 // millions of calls per solve; per-call allocation made GC ~46% of solver
@@ -99,6 +122,20 @@ function fireBlocked(path, nx, ny, fireLen) {
     if (path[i].x === nx && path[i].y === ny) return true;
   }
   return false;
+}
+
+// Touch-conversion card skill: perform one drag step from (x,y) to (nx,ny)
+// on `board` (mutated in place), converting the touched destination cell to
+// `convertType` first if this move's 1-indexed touch number is within
+// `convertCount`. `touchIndex` = the caller's current path length BEFORE
+// appending this move (path starts at length 1 with just the start cell, so
+// the first move is touch #1). No-op swap (plain Board.swap) when
+// convertType is null or convertCount is 0.
+function applyDragSwap(board, x, y, nx, ny, touchIndex, convertType, convertCount) {
+  if (convertType !== null && touchIndex <= convertCount) {
+    board.set(nx, ny, convertType);
+  }
+  board.swap(x, y, nx, ny);
 }
 
 function firstWaveNoOk(sim, types) {
@@ -1154,10 +1191,15 @@ class BoardSimulator {
         : new Set(options.hazardPositions.map(p => p.x * 10 + p.y)))
       : null;
     const work = board.clone();
-    let totalCombos = 0, firstCombos = 0, firstRunes = 0, chains = 0;
+    let totalCombos = 0, firstCombos = 0, firstAttrCombos = 0, firstRunes = 0, chains = 0;
     const firstClearedByType = Array(6).fill(0);
     const allGroups = [];
     let hazardViolated = false;
+    // Curse mechanic (P37, corrected P38): a PER-RUNE "never dissolve" —
+    // checked the same place/way as shield's decrement below (BEFORE the
+    // cell is cleared to -1), since a cursed rune can travel through
+    // gravity/cascades to a different cell than where it started.
+    let curseViolated = false;
     // Shield mechanic (P24, corrected P30/L40): count per-type shielded
     // runes present at the start, decrement as they're actually swept into a
     // dissolving group (checked BEFORE the cell is cleared to -1, below).
@@ -1193,6 +1235,9 @@ class BoardSimulator {
       chains++;
       if (chains === 1) {
         firstCombos = groups.length;
+        // Attribute combos = wave-1 groups of any NON-Heart type (首消N屬:
+        // 屬性珠 are all runes except Heart; repeats of one attribute count).
+        firstAttrCombos = groups.reduce((n, g) => n + (g.type !== 5 ? 1 : 0), 0);
         firstRunes = groups.reduce((s, g) => s + g.cells.length, 0);
         for (const g of groups) firstClearedByType[g.type] += g.cells.length;
       }
@@ -1212,6 +1257,7 @@ class BoardSimulator {
         for (const [x, y] of g.cells) {
           const v = work.get(x, y);
           if (isShielded(v)) shieldRemaining[baseType(v)]--;
+          if (isCursed(v)) curseViolated = true;
           work.set(x, y, -1);
         }
       }
@@ -1234,7 +1280,7 @@ class BoardSimulator {
     const reserveViolated = reserveTypes
       ? [...reserveTypes].some(t => (reserveTotal[t] - totalClearedByType[t]) < minRunOf(t))
       : false;
-    return {totalCombos, firstCombos, firstRunes, firstClearedByType, totalClearedByType, chains, groups: allGroups, boardAfter: work, hazardViolated, shieldViolated, shieldRemaining, shieldTotal, reserveViolated};
+    return {totalCombos, firstCombos, firstAttrCombos, firstRunes, firstClearedByType, totalClearedByType, chains, groups: allGroups, boardAfter: work, hazardViolated, shieldViolated, shieldRemaining, shieldTotal, reserveViolated, curseViolated};
   }
 }
 
@@ -1275,6 +1321,15 @@ class DoraSolver {
     // (overshoot is penalized in steering and disqualified), for combo-shield
     // style mechanics where extra combos are harmful.
     this.exactFirstCombos = options.exactFirstCombos ?? false;
+    // Target for FIRST-wave ATTRIBUTE combos (首消N屬, boss "首批消除N組
+    // 屬性符石"): wave-1 combo groups of any NON-Heart type. Repeats of one
+    // attribute count (3 Light groups = 3); Heart groups are simply not
+    // counted — they are neither forbidden nor rewarded by this target.
+    // Optional target (same tier as minFirstCombos), steered the same way.
+    this.minFirstAttrCombos = options.minFirstAttrCombos ?? 0;
+    // When true firstAttrCombos must equal the target exactly — overshoot is
+    // penalized in steering and disqualified (combo-shield style).
+    this.exactFirstAttrCombos = options.exactFirstAttrCombos ?? false;
     // Minimum FIRST-WAVE RUNE count (orbs dissolved in wave 1). Some bosses
     // (楊玉環 "NUM N") require >= N runes cleared first batch to deal damage.
     // Steered like minFirstCombos; overshoot is fine (more runes = still ok).
@@ -1305,6 +1360,42 @@ class DoraSolver {
     // not re-enter any of the last `fireRoute` cells it left (self-avoiding
     // within a sliding window). Orthogonal to scoring; composes with everything.
     this.fireRoute = options.fireRoute ?? 0;
+    // Touch-conversion card skill (2026-07-10, User-requested): the first
+    // `convertCount` runes the finger TOUCHES while dragging (i.e. every
+    // move's destination cell, in move order — NOT the start cell, which
+    // holds the picked-up rune) turn into `convertType` as they're touched,
+    // BEFORE the swap displaces them. The picked-up rune itself is never
+    // converted (it's never the swap's "destination" side), so it always
+    // rides unconverted to wherever the drag ends — matching the User's
+    // worked example ("first picked rune is wood, first 5 touched become
+    // water, the picked wood rune stays wood"). convertCount may be
+    // Infinity (CLI "max"/"all") for the whole path. Implemented as a
+    // stateful per-move effect (applyDragSwap below) rather than a post-hoc
+    // position mask, so REVISITED cells are handled correctly for free: a
+    // cell touched a 2nd time within the budget converts again (still ends
+    // up convertType either way); count is by MOVE, not by distinct cell.
+    // Orthogonal to scoring — bakes directly into the board every step sees,
+    // so ordinary weight/combo steering already routes around it optimally
+    // with no extra steering code needed. UNVERIFIED interaction: touching a
+    // frozen/shielded/cursed rune strips its status (converts to a plain
+    // convertType orb) — no live confirmation yet that this matches the
+    // real game.
+    this.convertType = options.convertType ?? null;
+    this.convertCount = options.convertCount ?? 0;
+    // Want-group target (2026-07-10, User-requested): an OPTIONAL steering
+    // target (best-effort, NOT a mandatory demand like clearTypes — never
+    // aborts, never gates bestHardOnly) for "somewhere across EVERY cascade
+    // wave, a match group of EXACTLY `wantGroupSize` cells of type
+    // `wantGroupType` dissolves". Unlike minFirstCombos (wave-1 only), this
+    // checks `sim.groups` (BoardSimulator.resolve already returns every
+    // wave's groups, not just wave 1) — no BoardSimulator change needed. No
+    // dedicated constructive planner yet (User confirmed best-effort is
+    // fine) — steered the same way as other optional targets: a flat reward
+    // when met, plus pairPotential(board, [wantGroupType]) as a cheap
+    // (imprecise — it rewards ANY adjacency of the type, not specifically
+    // clustering toward exactly N) partial-progress nudge while unmet.
+    this.wantGroupType = options.wantGroupType ?? null;
+    this.wantGroupSize = options.wantGroupSize ?? 0;
     // Rune types that dissolve at a run of 2 instead of 3 (boss `--2-match`).
     // Threaded into every BoardSimulator.resolve so scoring/combos reflect it.
     this.twoMatch = options.twoMatch ?? null;
@@ -1466,7 +1557,9 @@ class DoraSolver {
     // shielded-rune count to zero is forbidden, not merely suboptimal.
     // Same again for a reserve violation (P32): draining a --first-wave-have
     // sibling type below its own combo floor is forbidden, not suboptimal.
-    if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated) return {weight: -Infinity, sim};
+    // Same again for a curse violation (P37/P38): a cursed rune dissolving,
+    // in ANY wave, is forbidden, not suboptimal.
+    if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated || sim.curseViolated) return {weight: -Infinity, sim};
     const t = this.tunable;
     let weight = 0;
     for (const g of sim.groups) {
@@ -1485,6 +1578,127 @@ class DoraSolver {
       }
     }
     return {weight, sim};
+  }
+
+  /**
+   * Steering + soft-qualification for one already-resolved candidate board
+   * (extracted 2026-07-10, L54/P50, from solve()'s beam-expansion loop as a
+   * PURE mechanical move — same formulas, same `this.` field reads, zero
+   * behavior change; verify.js's full suite re-passing after the extraction
+   * is the proof). Exists as its own method so RearrangeSolver (a permutation
+   * search, not a drag-path search) can construct a plain DoraSolver purely
+   * as a SCORING ENGINE — `new DoraSolver(board, options).steerFor(candidate,
+   * sim)` — and get byte-identical demand semantics (minFirstCombos,
+   * minFirstAttrCombos, wantGroup, minFirstRunes, clearTypes,
+   * firstWaveNoTypes, firstWaveHaveTypes) without duplicating this logic.
+   * @param {Board} board candidate board (post-move/post-swap)
+   * @param {object} sim BoardSimulator.resolve(board) result — caller
+   *   already has this from calculateWeight(board)
+   * @returns {{steer, clearAllOk, firstWaveNoOk, wantGroupOk, firstWaveHaveOk,
+   *   hazardOk, shieldOk, reserveOk, curseOk, comboCount, firstCombos,
+   *   firstAttrCombos, firstRunes, firstClearedByType, chains}}
+   */
+  steerFor(board, sim) {
+    // Steer the beam toward the first-combo target (no effect when 0);
+    // below the target, adjacent pairs count as partial progress
+    let steer = 0;
+    if (this.minFirstCombos > 0) {
+      steer = Math.min(sim.firstCombos, this.minFirstCombos) * this.tunable.firstComboSteer;
+      if (this.exactFirstCombos) {
+        steer -= Math.max(0, sim.firstCombos - this.minFirstCombos) * this.tunable.firstComboSteer;
+      }
+      if (sim.firstCombos < this.minFirstCombos) {
+        steer += this.pairPotential(board) * this.tunable.pairSteer;
+      }
+    }
+    // Steer toward the first-wave ATTRIBUTE-combo target (首消N屬):
+    // identical shape to minFirstCombos, but only non-Heart groups
+    // count and partial progress only looks at non-Heart pairs.
+    if (this.minFirstAttrCombos > 0) {
+      steer += Math.min(sim.firstAttrCombos, this.minFirstAttrCombos) * this.tunable.firstComboSteer;
+      if (this.exactFirstAttrCombos) {
+        steer -= Math.max(0, sim.firstAttrCombos - this.minFirstAttrCombos) * this.tunable.firstComboSteer;
+      }
+      if (sim.firstAttrCombos < this.minFirstAttrCombos) {
+        steer += this.pairPotential(board, ATTR_TYPES) * this.tunable.pairSteer;
+      }
+    }
+    // Steer toward the want-group target: a match group of EXACTLY
+    // wantGroupSize cells of wantGroupType, dissolving in ANY wave
+    // (checked against sim.groups, which already spans every
+    // cascade wave — no wave-1 restriction like the targets above).
+    // Best-effort: a flat reward when met, else a cheap adjacency
+    // nudge (not size-aware — pairPotential doesn't know "exactly
+    // N", just "more same-color adjacency of this type").
+    let wantGroupOk = this.wantGroupType === null;
+    if (this.wantGroupType !== null) {
+      wantGroupOk = sim.groups.some(g => g.type === this.wantGroupType && g.cells.length === this.wantGroupSize);
+      if (wantGroupOk) {
+        steer += this.tunable.firstComboSteer;
+      } else {
+        steer += this.pairPotential(board, [this.wantGroupType]) * this.tunable.pairSteer;
+      }
+    }
+    // Steer toward a first-wave RUNE-count target (楊玉環 NUM). Reward
+    // runes up to the target; below it, pairs are partial progress.
+    // In exact mode overshoot is penalized just as hard as shortfall.
+    if (this.minFirstRunes > 0) {
+      steer += Math.min(sim.firstRunes, this.minFirstRunes) * this.tunable.firstComboSteer;
+      if (this.exactFirstRunes) {
+        steer -= Math.max(0, sim.firstRunes - this.minFirstRunes) * this.tunable.firstComboSteer;
+      }
+      if (sim.firstRunes < this.minFirstRunes) {
+        steer += this.pairPotential(board) * this.tunable.pairSteer;
+      }
+    }
+    // Steer toward the clear-all demand: reward each required-type rune
+    // dissolved in wave 1, penalize required runes still trapped in
+    // undissolvable cells (must be dragged out first), and count
+    // required-color adjacent pairs as partial progress while unmet.
+    let clearAllOk = true;
+    if (this.clearTypes.length > 0) {
+      let cleared = 0;
+      for (const t of this.clearTypes) {
+        cleared += sim.firstClearedByType[t];
+        if (sim.firstClearedByType[t] < this.clearTypeTotals[t]) clearAllOk = false;
+      }
+      steer += cleared * this.tunable.firstComboSteer;
+      steer -= this.trappedRequiredCount(board) * this.tunable.firstComboSteer;
+      if (!clearAllOk) {
+        steer += this.pairPotential(board, this.clearTypes) * this.tunable.pairSteer;
+      }
+    }
+    const firstWaveNoClear = this.firstWaveNoTypes.reduce((n, t) => n + sim.firstClearedByType[t], 0);
+    const firstWaveNoOk = firstWaveNoClear === 0;
+    if (this.firstWaveNoTypes.length > 0) {
+      steer -= firstWaveNoClear * this.tunable.firstComboSteer * 2;
+    }
+    // Steer toward the --first-wave-have demand: reward each listed
+    // type's FIRST rune cleared in wave 1 (only the first — once a
+    // type is satisfied, more of it is no better for THIS demand),
+    // and count adjacent pairs of still-unsatisfied types as partial
+    // progress, same shape as clearAllOk's steering above.
+    let haveCount = 0;
+    for (const t of this.firstWaveHaveTypes) {
+      if (sim.firstClearedByType[t] > 0) { haveCount++; steer += this.tunable.firstComboSteer; }
+    }
+    const firstWaveHaveOkLocal = haveCount === this.firstWaveHaveTypes.length;
+    if (this.firstWaveHaveTypes.length > 0 && !firstWaveHaveOkLocal) {
+      const unmet = this.firstWaveHaveTypes.filter(t => sim.firstClearedByType[t] === 0);
+      steer += this.pairPotential(board, unmet) * this.tunable.pairSteer;
+    }
+    return {
+      steer, clearAllOk, firstWaveNoOk, wantGroupOk,
+      firstWaveHaveOk: firstWaveHaveOkLocal,
+      hazardOk: !sim.hazardViolated,
+      shieldOk: !sim.shieldViolated,
+      reserveOk: !sim.reserveViolated,
+      curseOk: !sim.curseViolated,
+      comboCount: sim.totalCombos, firstCombos: sim.firstCombos,
+      firstAttrCombos: sim.firstAttrCombos,
+      firstRunes: sim.firstRunes, firstClearedByType: sim.firstClearedByType,
+      chains: sim.chains,
+    };
   }
 
   /**
@@ -1556,7 +1770,7 @@ class DoraSolver {
           if (fireBlocked(s.path, nx, ny, this.fireRoute)) continue;
 
           const childBoard = s.board.clone();
-          childBoard.swap(s.x, s.y, nx, ny);
+          applyDragSwap(childBoard, s.x, s.y, nx, ny, s.path.length, this.convertType, this.convertCount);
           const gridKey = gridKeyOf(childBoard);
           const cellKey = gridKey + String.fromCharCode(33 + ny * this.board.width + nx);
           if (seen.has(cellKey)) continue;
@@ -1564,76 +1778,8 @@ class DoraSolver {
           let sc = scoreCache.get(gridKey);
           if (sc === undefined) {
             const {weight, sim} = this.calculateWeight(childBoard);
-            // Steer the beam toward the first-combo target (no effect when 0);
-            // below the target, adjacent pairs count as partial progress
-            let steer = 0;
-            if (this.minFirstCombos > 0) {
-              steer = Math.min(sim.firstCombos, this.minFirstCombos) * this.tunable.firstComboSteer;
-              if (this.exactFirstCombos) {
-                steer -= Math.max(0, sim.firstCombos - this.minFirstCombos) * this.tunable.firstComboSteer;
-              }
-              if (sim.firstCombos < this.minFirstCombos) {
-                steer += this.pairPotential(childBoard) * this.tunable.pairSteer;
-              }
-            }
-            // Steer toward a first-wave RUNE-count target (楊玉環 NUM). Reward
-            // runes up to the target; below it, pairs are partial progress.
-            // In exact mode overshoot is penalized just as hard as shortfall.
-            if (this.minFirstRunes > 0) {
-              steer += Math.min(sim.firstRunes, this.minFirstRunes) * this.tunable.firstComboSteer;
-              if (this.exactFirstRunes) {
-                steer -= Math.max(0, sim.firstRunes - this.minFirstRunes) * this.tunable.firstComboSteer;
-              }
-              if (sim.firstRunes < this.minFirstRunes) {
-                steer += this.pairPotential(childBoard) * this.tunable.pairSteer;
-              }
-            }
-            // Steer toward the clear-all demand: reward each required-type rune
-            // dissolved in wave 1, penalize required runes still trapped in
-            // undissolvable cells (must be dragged out first), and count
-            // required-color adjacent pairs as partial progress while unmet.
-            let clearAllOk = true;
-            if (this.clearTypes.length > 0) {
-              let cleared = 0;
-              for (const t of this.clearTypes) {
-                cleared += sim.firstClearedByType[t];
-                if (sim.firstClearedByType[t] < this.clearTypeTotals[t]) clearAllOk = false;
-              }
-              steer += cleared * this.tunable.firstComboSteer;
-              steer -= this.trappedRequiredCount(childBoard) * this.tunable.firstComboSteer;
-              if (!clearAllOk) {
-                steer += this.pairPotential(childBoard, this.clearTypes) * this.tunable.pairSteer;
-              }
-            }
-            const firstWaveNoClear = this.firstWaveNoTypes.reduce((n, t) => n + sim.firstClearedByType[t], 0);
-            const firstWaveNoOk = firstWaveNoClear === 0;
-            if (this.firstWaveNoTypes.length > 0) {
-              steer -= firstWaveNoClear * this.tunable.firstComboSteer * 2;
-            }
-            // Steer toward the --first-wave-have demand: reward each listed
-            // type's FIRST rune cleared in wave 1 (only the first — once a
-            // type is satisfied, more of it is no better for THIS demand),
-            // and count adjacent pairs of still-unsatisfied types as partial
-            // progress, same shape as clearAllOk's steering above.
-            let haveCount = 0;
-            for (const t of this.firstWaveHaveTypes) {
-              if (sim.firstClearedByType[t] > 0) { haveCount++; steer += this.tunable.firstComboSteer; }
-            }
-            const firstWaveHaveOkLocal = haveCount === this.firstWaveHaveTypes.length;
-            if (this.firstWaveHaveTypes.length > 0 && !firstWaveHaveOkLocal) {
-              const unmet = this.firstWaveHaveTypes.filter(t => sim.firstClearedByType[t] === 0);
-              steer += this.pairPotential(childBoard, unmet) * this.tunable.pairSteer;
-            }
-            sc = {
-              weight, steer, clearAllOk, firstWaveNoOk,
-              firstWaveHaveOk: firstWaveHaveOkLocal,
-              hazardOk: !sim.hazardViolated,
-              shieldOk: !sim.shieldViolated,
-              reserveOk: !sim.reserveViolated,
-              comboCount: sim.totalCombos, firstCombos: sim.firstCombos,
-              firstRunes: sim.firstRunes, firstClearedByType: sim.firstClearedByType,
-              chains: sim.chains,
-            };
+            const steered = this.steerFor(childBoard, sim);
+            sc = {weight, ...steered};
             if (scoreCache.size >= 1000000) scoreCache.clear();
             scoreCache.set(gridKey, sc);
           }
@@ -1644,6 +1790,7 @@ class DoraSolver {
             moves: [...s.moves, dir.name],
             prevDir: dir, weight: sc.weight, searchScore: sc.weight + sc.steer,
             comboCount: sc.comboCount, firstCombos: sc.firstCombos,
+            firstAttrCombos: sc.firstAttrCombos,
             firstRunes: sc.firstRunes, firstClearedByType: sc.firstClearedByType,
             chains: sc.chains,
           };
@@ -1654,26 +1801,31 @@ class DoraSolver {
           // constraint. Multiple end cells are not weighted/preferred among
           // themselves — better() below picks the best-scoring one naturally.
           const endOk = this.endCells === null || this.endCells.some(e => nx === e.x && ny === e.y);
-          // hazardOk/shieldOk/reserveOk gate EVERY tier unconditionally
-          // (P22/P30/P32): a hazard, shield, or reserve-floor violation is
-          // forbidden, not merely undesirable, so it must never become
-          // best/bestQualified/bestHardOnly even when no other demand is
-          // active. Weight alone (-Infinity in calculateWeight) isn't
-          // sufficient — if EVERY reachable state happened to violate it,
-          // `better()` would still pick one of them without this gate.
-          const constraintsOk = sc.hazardOk && sc.shieldOk && sc.reserveOk;
+          // hazardOk/shieldOk/reserveOk/curseOk gate EVERY tier
+          // unconditionally (P22/P30/P32/P37): a hazard, shield, reserve-
+          // floor, or curse violation is forbidden, not merely undesirable,
+          // so it must never become best/bestQualified/bestHardOnly even
+          // when no other demand is active. Weight alone (-Infinity in
+          // calculateWeight) isn't sufficient — if EVERY reachable state
+          // happened to violate it, `better()` would still pick one of them
+          // without this gate.
+          const constraintsOk = sc.hazardOk && sc.shieldOk && sc.reserveOk && sc.curseOk;
           if (constraintsOk && endOk && better(child, best)) best = child;
           const qualifies = (this.minFirstCombos === 0 || (this.exactFirstCombos
               ? sc.firstCombos === this.minFirstCombos
               : sc.firstCombos >= this.minFirstCombos))
+            && (this.minFirstAttrCombos === 0 || (this.exactFirstAttrCombos
+              ? sc.firstAttrCombos === this.minFirstAttrCombos
+              : sc.firstAttrCombos >= this.minFirstAttrCombos))
             && (this.minFirstRunes === 0 || (this.exactFirstRunes
               ? sc.firstRunes === this.minFirstRunes
               : sc.firstRunes >= this.minFirstRunes))
             && sc.clearAllOk
             && sc.firstWaveNoOk
-            && sc.firstWaveHaveOk;
-          if ((this.minFirstCombos > 0 || this.minFirstRunes > 0
-                || this.clearTypes.length > 0 || this.firstWaveNoTypes.length > 0 || this.firstWaveHaveTypes.length > 0)
+            && sc.firstWaveHaveOk
+            && sc.wantGroupOk;
+          if ((this.minFirstCombos > 0 || this.minFirstAttrCombos > 0 || this.minFirstRunes > 0
+                || this.clearTypes.length > 0 || this.firstWaveNoTypes.length > 0 || this.firstWaveHaveTypes.length > 0 || this.wantGroupType !== null)
               && qualifies && constraintsOk && endOk && better(child, bestQualified)) bestQualified = child;
           // clearTypes, firstWaveNoTypes, and firstWaveHaveTypes are all
           // MANDATORY demands, unlike minFirstCombos/minFirstRunes which are
@@ -1724,7 +1876,7 @@ class DoraSolver {
     // best (which may violate it) — see bestClearAllOnly comment above.
     const pick = bestQualified ?? bestHardOnly ?? best;
     if (pick === null) {
-      return {startX: 0, startY: 0, path: [{x: 0, y: 0}], moves: [], score: 0, comboCount: 0, firstCombos: 0, firstRunes: 0, firstClearedByType: Array(6).fill(0), chains: 0, board: this.board.clone()};
+      return {startX: 0, startY: 0, path: [{x: 0, y: 0}], moves: [], score: 0, comboCount: 0, firstCombos: 0, firstAttrCombos: 0, firstRunes: 0, firstClearedByType: Array(6).fill(0), chains: 0, board: this.board.clone()};
     }
     return this._solution(pick);
   }
@@ -1734,7 +1886,8 @@ class DoraSolver {
       startX: pick.startX, startY: pick.startY,
       path: pick.path, moves: pick.moves,
       score: pick.weight, comboCount: pick.comboCount,
-      firstCombos: pick.firstCombos, firstRunes: pick.firstRunes,
+      firstCombos: pick.firstCombos, firstAttrCombos: pick.firstAttrCombos,
+      firstRunes: pick.firstRunes,
       firstClearedByType: pick.firstClearedByType, chains: pick.chains,
       board: pick.board,
     };
@@ -1769,6 +1922,13 @@ class TargetPlanner {
     // gated to >=5 combos and told "routing-failed".
     this.clearAllComboFloor = options.minFirstCombos ?? 0;
     this.exact = options.exact ?? false; // require firstCombos === target, not >=
+    // First-wave ATTRIBUTE-combo demand (首消N屬, non-Heart groups). When set,
+    // planTargets' color assignment simply excludes Heart, so every
+    // constructed combo counts toward the demand; routed results are also
+    // verified against sim.firstAttrCombos (cascade-formed Heart groups don't
+    // count but don't hurt either, except in exactAttr mode).
+    this.attrTarget = options.minFirstAttrCombos ?? 0;
+    this.exactAttr = options.exactFirstAttrCombos ?? false;
     this.maxPath = options.maxPath ?? 60;
     this.beamWidth = options.beamWidth ?? 300;
     this.maxTargets = options.maxTargets ?? 8;
@@ -1782,6 +1942,10 @@ class TargetPlanner {
     this.startCells = options.startCells ?? null;
     this.endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
     this.fireRoute = options.fireRoute ?? 0; // see fireBlocked
+    // Touch-conversion (see DoraSolver's constructor comment) — same
+    // semantics, applied via the same applyDragSwap helper in routeToTarget.
+    this.convertType = options.convertType ?? null;
+    this.convertCount = options.convertCount ?? 0;
     this.twoMatch = options.twoMatch ?? null; // types dissolving at run of 2
     this.noSolvableTypes = [...new Set(options.noSolvableTypes ?? [])];
     this.firstWaveNoTypes = [...new Set(options.firstWaveNoTypes ?? [])];
@@ -1863,6 +2027,7 @@ class TargetPlanner {
         const options = [];
         for (let c = 0; c < 6; c++) {
           if (this.firstWaveNoTypes.includes(c) || this.noSolvableTypes.includes(c)) continue;
+          if (this.attrTarget > 0 && c === 5) continue; // 首消N屬: construct non-Heart combos only
           if (remaining[c] < 3) continue;
           let clash = false;
           for (let j = 0; j < i; j++) {
@@ -1998,7 +2163,7 @@ class TargetPlanner {
           if (!this.movable(nx, ny)) continue;
           if (fireBlocked(s.path, nx, ny, this.fireRoute)) continue;
           const childBoard = s.board.clone();
-          childBoard.swap(s.x, s.y, nx, ny);
+          applyDragSwap(childBoard, s.x, s.y, nx, ny, s.path.length, this.convertType, this.convertCount);
           const st = statsOf(childBoard);
           const child = {
             board: childBoard, x: nx, y: ny,
@@ -2135,18 +2300,20 @@ class TargetPlanner {
       const route = this.routeToTarget(target);
       if (route === null) continue;
       const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes, hazardPositions: this.hazardPositions, reserveTypes: this.reserveTypes.length > 0 ? this.reserveTypes : null});
-      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated) continue;
+      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated || sim.curseViolated) continue;
       if (!firstWaveHaveOk(sim, this.firstWaveHaveTypes)) continue;
       if (!firstWaveNoOk(sim, this.firstWaveNoTypes)) continue;
       if (this.clearTypes.some(t => sim.firstClearedByType[t] < this.clearTypeTotals[t])) continue;
       if (this.clearAllComboFloor > 0 && (this.exact ? sim.firstCombos !== this.clearAllComboFloor : sim.firstCombos < this.clearAllComboFloor)) continue;
+      if (this.attrTarget > 0 && (this.exactAttr ? sim.firstAttrCombos !== this.attrTarget : sim.firstAttrCombos < this.attrTarget)) continue;
       if (sim.totalCombos > bestCombos) {
         bestCombos = sim.totalCombos;
         best = {
           startX: route.startX, startY: route.startY,
           path: route.path, moves: route.moves, board: route.board,
           score: sim.totalCombos * 4, comboCount: sim.totalCombos,
-          firstCombos: sim.firstCombos, firstRunes: sim.firstRunes,
+          firstCombos: sim.firstCombos, firstAttrCombos: sim.firstAttrCombos,
+          firstRunes: sim.firstRunes,
           firstClearedByType: sim.firstClearedByType, chains: sim.chains,
         };
         if (this.verbose) console.log(`[TargetPlanner] clear-all target #${tried}: combos=${sim.totalCombos}`);
@@ -2218,17 +2385,19 @@ class TargetPlanner {
       const route = this.routeToTarget(target);
       if (route === null) continue;
       const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes, hazardPositions: this.hazardPositions, reserveTypes: this.reserveTypes.length > 0 ? this.reserveTypes : null});
-      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated) continue;
+      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated || sim.curseViolated) continue;
       if (!firstWaveHaveOk(sim, this.firstWaveHaveTypes)) continue;
       if (!firstWaveNoOk(sim, this.firstWaveNoTypes)) continue;
       if (this.clearAllComboFloor > 0 && (this.exact ? sim.firstCombos !== this.clearAllComboFloor : sim.firstCombos < this.clearAllComboFloor)) continue;
+      if (this.attrTarget > 0 && (this.exactAttr ? sim.firstAttrCombos !== this.attrTarget : sim.firstAttrCombos < this.attrTarget)) continue;
       if (sim.totalCombos > bestCombos) {
         bestCombos = sim.totalCombos;
         best = {
           startX: route.startX, startY: route.startY,
           path: route.path, moves: route.moves, board: route.board,
           score: sim.totalCombos * 4, comboCount: sim.totalCombos,
-          firstCombos: sim.firstCombos, firstRunes: sim.firstRunes,
+          firstCombos: sim.firstCombos, firstAttrCombos: sim.firstAttrCombos,
+          firstRunes: sim.firstRunes,
           firstClearedByType: sim.firstClearedByType, chains: sim.chains,
         };
         if (this.verbose) console.log(`[TargetPlanner] have target #${tried}: combos=${sim.totalCombos}`);
@@ -2254,10 +2423,11 @@ class TargetPlanner {
       const route = this.routeToTarget(target);
       if (route === null) continue;
       const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes, hazardPositions: this.hazardPositions, reserveTypes: this.reserveTypes.length > 0 ? this.reserveTypes : null});
-      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated) continue;
+      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated || sim.curseViolated) continue;
       if (!firstWaveHaveOk(sim, this.firstWaveHaveTypes)) continue;
       // reject accidental merges/extras (exact) or shortfalls (both modes)
       if (this.exact ? sim.firstCombos !== this.target : sim.firstCombos < this.target) continue;
+      if (this.attrTarget > 0 && (this.exactAttr ? sim.firstAttrCombos !== this.attrTarget : sim.firstAttrCombos < this.attrTarget)) continue;
       if (!firstWaveNoOk(sim, this.firstWaveNoTypes)) continue;
       // reject routes that violate a clear-all-of-type demand
       if (this.clearTypes.some(t => sim.firstClearedByType[t] < this.clearTypeTotals[t])) continue;
@@ -2267,7 +2437,8 @@ class TargetPlanner {
           startX: route.startX, startY: route.startY,
           path: route.path, moves: route.moves, board: route.board,
           score: sim.totalCombos * 4, comboCount: sim.totalCombos,
-          firstCombos: sim.firstCombos, firstRunes: sim.firstRunes,
+          firstCombos: sim.firstCombos, firstAttrCombos: sim.firstAttrCombos,
+          firstRunes: sim.firstRunes,
           firstClearedByType: sim.firstClearedByType, chains: sim.chains,
         },
         reason: 'ok', targetsTried: tried,
@@ -2275,6 +2446,384 @@ class TargetPlanner {
     }
     return {solution: null, reason: 'routing-failed', targetsTried: tried};
   }
+}
+
+/**
+ * 排珠 rearrangement mode (P50, 2026-07-10, User-requested + User-confirmed
+ * design). A card skill: runes can be dragged to ANY position and released
+ * WITHOUT triggering a dissolve — only when the stage's timer expires does a
+ * normal full cascade resolve run. User-confirmed model: multiple SEPARATE
+ * drags are allowed before time runs out (not one continuous drag), no
+ * gravity happens between releases (the board is frozen except for the
+ * drags themselves), the drag budget is effectively unlimited, and at
+ * time-up the resolve is a FULL cascade (same as BoardSimulator.resolve()
+ * everywhere else) — so the existing demand flags (--clear-all,
+ * --want-group, --first-combos, etc.) should compose with this mode using
+ * their EXISTING meaning, just solved by choosing the best PERMUTATION of
+ * the existing runes instead of searching a single drag path.
+ *
+ * Why this reframes the problem entirely: adjacent-cell TRANSPOSITIONS
+ * (direct swaps, which is this project's drag model — see Board.swap) on
+ * any CONNECTED graph generate the full symmetric group on that graph's
+ * nodes (a standard result, and NOT the same as the classic sliding
+ * 15-puzzle's single-blank model, which has a real parity obstruction —
+ * there is no such obstruction here because every move is a genuine pairwise
+ * swap, not a slide into one hole). So with "unlimited" multi-drag budget
+ * and no intervening gravity/dissolve, ANY permutation of the runes within
+ * one connected region of "swappable" cells is achievable via SOME finite
+ * sequence of real drags. The solving problem is therefore NOT "find the
+ * best drag path" (DoraSolver's job) but "find the best ARRANGEMENT of the
+ * existing runes" — then, separately, decompose that arrangement into an
+ * actual executable sequence of drags (decomposeRearrangement below).
+ *
+ * Movability: a cell can participate in ANY swap unless CELL_FLAGS.NO_SWAP
+ * is set on it (hurricane/locked cells — P9/P29). NO_PICKUP does NOT reduce
+ * reachability here (unlike single-drag solving): a NO_PICKUP cell's rune
+ * can still be relocated by a DIFFERENT drag that swaps something else INTO
+ * it, displacing it out — NO_PICKUP only restricts which cell a PHYSICAL
+ * drag may START from, and decomposeRearrangement never needs to start a
+ * drag on a NO_PICKUP cell to relocate its contents (see BFS donor search:
+ * a NO_PICKUP cell is only ever the DESTINATION of the final swap in a
+ * chain, never required to be the drag's start). Sealed columns (P6) do NOT
+ * restrict movability at all (only dissolve, which BoardSimulator.resolve
+ * already models) — a rune can be dragged into or out of a sealed column
+ * freely under this mode, same as ordinary dragging.
+ *
+ * Runes are STRICTLY confined to their own connected component of
+ * swappable cells — there is no path a drag could ever take between two
+ * disconnected regions, so cross-component rearrangement is impossible by
+ * construction, not a search limitation.
+ */
+class RearrangeSolver {
+  constructor(board, options = {}) {
+    this.board = board;
+    // A plain DoraSolver, constructed with the SAME options, is used purely
+    // as a SCORING ENGINE (calculateWeight/steerFor) — never .solve()d. This
+    // reuses its constructor's setup (clearTypeTotals, _nd, tunable
+    // defaults) and its steering logic byte-for-byte with zero duplication;
+    // see steerFor's doc comment for why this is safe.
+    this.scorer = new DoraSolver(board, options);
+    this.flags = options.flags ?? null;
+    this.sealedColumns = options.sealedColumns ?? [];
+    this.beamWidth = options.rearrangeBeamWidth ?? 60;
+    this.maxSteps = options.rearrangeMaxSteps ?? 40;
+    this.verbose = options.verbose ?? false;
+  }
+
+  flag(x, y) { return this.flags === null ? 0 : this.flags[y][x]; }
+  movable(x, y) { return (this.flag(x, y) & CELL_FLAGS.NO_SWAP) === 0; }
+
+  /** Connected components of swappable cells (4-directional grid adjacency,
+   * restricted to movable() cells). Each component is an array of {x,y};
+   * components of size <2 have nothing to rearrange and are skipped by
+   * solve(). @returns {Array<Array<{x,y}>>} */
+  movableComponents() {
+    const w = this.board.width, h = this.board.height;
+    const seen = new Set();
+    const components = [];
+    for (let y0 = 0; y0 < h; y0++) {
+      for (let x0 = 0; x0 < w; x0++) {
+        if (!this.movable(x0, y0) || seen.has(y0 * w + x0)) continue;
+        const comp = [];
+        const queue = [{x: x0, y: y0}];
+        seen.add(y0 * w + x0);
+        while (queue.length > 0) {
+          const {x, y} = queue.shift();
+          comp.push({x, y});
+          for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+            const key = ny * w + nx;
+            if (seen.has(key) || !this.movable(nx, ny)) continue;
+            seen.add(key);
+            queue.push({x: nx, y: ny});
+          }
+        }
+        components.push(comp);
+      }
+    }
+    return components;
+  }
+
+  /** Score one candidate board via the shared DoraSolver scoring engine.
+   * @returns {{searchScore, weight, comboCount, ...steerFor fields, constraintsOk}} */
+  scoreBoard(board) {
+    const {weight, sim} = this.scorer.calculateWeight(board);
+    const steered = this.scorer.steerFor(board, sim);
+    const constraintsOk = steered.hazardOk && steered.shieldOk && steered.reserveOk && steered.curseOk;
+    return {weight, searchScore: weight + steered.steer, constraintsOk, ...steered};
+  }
+
+  /**
+   * Beam search over SWAP moves (not drag-path moves): each step tries
+   * swapping every pair of cells within one connected movable component,
+   * keeps the top beamWidth boards by searchScore, repeats maxSteps times.
+   * Mirrors DoraSolver.solve()'s best/bestQualified/bestHardOnly tiering
+   * (same qualifies/constraintsOk shape) so the SAME demand flags behave
+   * identically in meaning, just searched via permutations instead of paths.
+   * @returns {{board, score, comboCount, firstCombos, firstAttrCombos,
+   *   firstRunes, firstClearedByType, chains, movableCells}} same solution
+   *   shape as DoraSolver's _solution() minus path/moves/startX/startY
+   *   (there is no single drag path — see decomposeRearrangement).
+   */
+  solve() {
+    const components = this.movableComponents().filter(c => c.length >= 2);
+    let board = this.board.clone();
+    const movableCells = components.flat();
+    const opts = this.scorer;
+
+    const better = (a, b) => {
+      if (b === null) return true;
+      if (a.weight !== b.weight) return a.weight > b.weight;
+      return a.comboCount > b.comboCount;
+    };
+    const hasOptionalTarget = opts.minFirstCombos > 0 || opts.minFirstAttrCombos > 0
+      || opts.minFirstRunes > 0 || opts.wantGroupType !== null;
+    const hasHardDemand = opts.clearTypes.length > 0 || opts.firstWaveNoTypes.length > 0 || opts.firstWaveHaveTypes.length > 0;
+
+    for (const comp of components) {
+      let beam = [board];
+      let best = null, bestQualified = null, bestHardOnly = null;
+      const consider = b => {
+        const sc = this.scoreBoard(b);
+        if (!sc.constraintsOk) return null;
+        const cand = {board: b, weight: sc.weight, searchScore: sc.searchScore, comboCount: sc.comboCount,
+          firstCombos: sc.firstCombos, firstAttrCombos: sc.firstAttrCombos, firstRunes: sc.firstRunes,
+          firstClearedByType: sc.firstClearedByType, chains: sc.chains};
+        if (better(cand, best)) best = cand;
+        const qualifies = (opts.minFirstCombos === 0 || (opts.exactFirstCombos
+            ? sc.firstCombos === opts.minFirstCombos : sc.firstCombos >= opts.minFirstCombos))
+          && (opts.minFirstAttrCombos === 0 || (opts.exactFirstAttrCombos
+            ? sc.firstAttrCombos === opts.minFirstAttrCombos : sc.firstAttrCombos >= opts.minFirstAttrCombos))
+          && (opts.minFirstRunes === 0 || (opts.exactFirstRunes
+            ? sc.firstRunes === opts.minFirstRunes : sc.firstRunes >= opts.minFirstRunes))
+          && sc.clearAllOk && sc.firstWaveNoOk && sc.firstWaveHaveOk && sc.wantGroupOk;
+        if ((hasOptionalTarget || hasHardDemand) && qualifies && better(cand, bestQualified)) bestQualified = cand;
+        if (hasHardDemand && sc.clearAllOk && sc.firstWaveNoOk && sc.firstWaveHaveOk && better(cand, bestHardOnly)) bestHardOnly = cand;
+        return cand;
+      };
+      consider(board); // the current (no-op) arrangement is always a valid candidate
+
+      for (let step = 0; step < this.maxSteps; step++) {
+        const children = [];
+        const seen = new Set();
+        for (const b of beam) {
+          for (let i = 0; i < comp.length; i++) {
+            for (let j = i + 1; j < comp.length; j++) {
+              const a = comp[i], c = comp[j];
+              if (b.get(a.x, a.y) === b.get(c.x, c.y)) continue; // no-op swap
+              const child = b.clone();
+              child.swap(a.x, a.y, c.x, c.y);
+              const key = gridKeyOf(child);
+              if (seen.has(key)) continue;
+              seen.add(key);
+              const cand = consider(child);
+              if (cand) children.push(cand);
+            }
+          }
+        }
+        if (children.length === 0) break;
+        children.sort((x, y) => y.searchScore - x.searchScore);
+        beam = children.slice(0, this.beamWidth).map(c => c.board);
+        if (this.verbose && step % 5 === 4) {
+          console.log(`[RearrangeSolver] component(${comp.length} cells) step ${step + 1}/${this.maxSteps} best weight=${best ? best.weight : 'n/a'}`);
+        }
+      }
+      const pick = bestQualified ?? bestHardOnly ?? best;
+      if (pick) board = pick.board;
+    }
+
+    const finalSc = this.scoreBoard(board);
+    return {
+      board, score: finalSc.weight, comboCount: finalSc.comboCount,
+      firstCombos: finalSc.firstCombos, firstAttrCombos: finalSc.firstAttrCombos,
+      firstRunes: finalSc.firstRunes, firstClearedByType: finalSc.firstClearedByType,
+      chains: finalSc.chains, movableCells,
+    };
+  }
+}
+
+/**
+ * Decompose a target rearrangement into an executable SEQUENCE of separate
+ * drags (排珠, RearrangeSolver's companion).
+ *
+ * Algorithm: prune cells in LEAF ORDER of a spanning tree over the movable
+ * region (one tree per connected component). Removing a LEAF from a tree
+ * never disconnects the rest of it — this is what guarantees termination
+ * and correctness where a naive "lock in scan order" approach can strand a
+ * cell whose donor becomes unreachable once the shrinking search graph
+ * disconnects (caught live in this project's own testing before shipping:
+ * a fixed row-major scan order locked cells whose donors later became
+ * unreachable, leaving the replayed board with 10+ mismatched cells).
+ *
+ * INVARIANT (why every donor search below is guaranteed to succeed): at
+ * every point, {board values among not-yet-pruned cells} as a MULTISET
+ * equals {target values among not-yet-pruned cells}. True initially
+ * (RearrangeSolver only performs swaps within a component, which conserves
+ * the multiset) and preserved by induction — fixing a leaf L moves values
+ * around ONLY among cells that remain not-yet-pruned (the donor's path),
+ * then L (now matching its target) is removed from both sides equally.
+ * So the needed value for the CURRENT leaf always exists among not-yet-
+ * pruned cells, and since that set stays connected (leaf-pruning invariant)
+ * a BFS search from the leaf is GUARANTEED to reach it.
+ *
+ * The BFS donor search itself uses the FULL grid-adjacency graph (not
+ * restricted to tree edges) among not-yet-pruned cells, for shorter/more
+ * natural drag paths than tree-only routing would give — the spanning tree
+ * is used ONLY to decide a safe PROCESSING ORDER, not to constrain paths.
+ *
+ * --convert composition (2026-07-10, User-requested + User-confirmed
+ * design): the touch-conversion card skill (P46) can be layered on top —
+ * "only the FIRST drag converts, and the touched-rune count can be
+ * infinite (--convert TYPE:max)". Only the first PHYSICAL drag actually
+ * generated (not the first leaf processed — some leaves already match
+ * their target and need no drag at all) applies `applyDragSwap`'s
+ * conversion semantics to its own path: the picked-up rune (path[0], never
+ * a swap DESTINATION) still always rides unconverted to the end, exactly
+ * like single-drag mode. Because this happens strictly AFTER
+ * RearrangeSolver already chose the target board, it is a pure EXECUTION
+ * side-effect on top of an already-fixed plan — same "bonus, not a
+ * requirement" model as single-drag --convert composing with --clear-all
+ * (P48): the search never needs to know about it.
+ *
+ * Consequence for the leaf-pruning invariant above: forcing some of the
+ * first drag's LEFT-BEHIND cells to convertType is a genuine rune-TYPE
+ * change, which the multiset-conservation proof above assumed never
+ * happens — so after the first drag, a LATER leaf's exact needed value may
+ * no longer exist anywhere among not-yet-pruned cells (converted away).
+ * bfsFindDonor returning null is therefore a real, expected outcome once
+ * conversion is active (not "never happens" as in the no-convert case) —
+ * handled by skipping that leaf's fix entirely (best-effort: it keeps
+ * whatever value conversion left it with) rather than crashing. The
+ * happens ONLY when conversion consumed the last copy of a value some
+ * not-yet-fixed cell's target needed — since the first drag is a single,
+ * fixed event (not repeated), this is a bounded, one-time risk from that
+ * one drag, not a growing problem across the sequence. Left unmeasured
+ * live: how often it actually triggers in practice (a live probe in this
+ * project's own testing, with convertCount=Infinity across a wide first
+ * drag, found zero misses — but that is one data point, not a guarantee).
+ *
+ * @param {Board} originalBoard the board before any drags
+ * @param {Board} targetBoard RearrangeSolver's chosen final arrangement
+ * @param {Array<{x,y}>} movableCells cells eligible to participate (same
+ *   list RearrangeSolver.solve() returns — everything outside this set is
+ *   assumed identical between originalBoard/targetBoard and is left alone)
+ * @param {number|null} convertType rune type the first drag's touched
+ *   (left-behind) cells convert to; null = no conversion (default)
+ * @param {number} convertCount how many of the first drag's touches
+ *   convert (1-indexed by touch order); may be Infinity for the whole drag
+ * @returns {{drags: Array<{startX, startY, path: Array<{x,y}>, moves:
+ *   string[]}>, board: Board}} `board` is the ACTUAL final board — equal to
+ *   targetBoard when convertType is null, but DIFFERENT from it once
+ *   conversion is active (the whole point of returning it): callers doing
+ *   any post-decomposition demand check (--clear-all, --want-group, etc.)
+ *   must use THIS board, never targetBoard, or they'd be checking against
+ *   an arrangement that no longer exists after real conversion happened.
+ */
+function decomposeRearrangement(originalBoard, targetBoard, movableCells, convertType = null, convertCount = 0) {
+  const board = originalBoard.clone();
+  const drags = [];
+  const w = originalBoard.width, h = originalBoard.height;
+  const cellKey = (x, y) => y * w + x;
+  const dirName = (dx, dy) => dx === 1 ? 'right' : dx === -1 ? 'left' : dy === 1 ? 'down' : 'up';
+  const movableSet = new Set(movableCells.map(c => cellKey(c.x, c.y)));
+  const cellOf = new Map(movableCells.map(c => [cellKey(c.x, c.y), c]));
+
+  // Spanning tree(s) via BFS from an arbitrary root per connected component
+  // (a component here can only be entered from within — grid-adjacency
+  // restricted to movableSet — so BFS naturally stays inside one component).
+  const treeAdj = new Map(movableCells.map(c => [cellKey(c.x, c.y), new Set()]));
+  const seenForTree = new Set();
+  for (const root of movableCells) {
+    const rk = cellKey(root.x, root.y);
+    if (seenForTree.has(rk)) continue;
+    seenForTree.add(rk);
+    const queue = [root];
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      const ck = cellKey(cur.x, cur.y);
+      for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+        const nx = cur.x + dx, ny = cur.y + dy;
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+        const nk = cellKey(nx, ny);
+        if (!movableSet.has(nk) || seenForTree.has(nk)) continue;
+        seenForTree.add(nk);
+        treeAdj.get(ck).add(nk);
+        treeAdj.get(nk).add(ck);
+        queue.push({x: nx, y: ny});
+      }
+    }
+  }
+
+  const pruned = new Set();
+  const degree = new Map([...treeAdj].map(([k, nbrs]) => [k, nbrs.size]));
+
+  const bfsFindDonor = (from, neededValue) => {
+    const visited = new Set([cellKey(from.x, from.y)]);
+    let frontier = [{x: from.x, y: from.y, path: [{x: from.x, y: from.y}]}];
+    while (frontier.length > 0) {
+      const next = [];
+      for (const node of frontier) {
+        if (!(node.x === from.x && node.y === from.y) && board.get(node.x, node.y) === neededValue) {
+          return node.path;
+        }
+        for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+          const nx = node.x + dx, ny = node.y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          const key = cellKey(nx, ny);
+          if (visited.has(key) || pruned.has(key) || !movableSet.has(key)) continue;
+          visited.add(key);
+          next.push({x: nx, y: ny, path: [...node.path, {x: nx, y: ny}]});
+        }
+      }
+      frontier = next;
+    }
+    // Without conversion this is provably unreachable (invariant above);
+    // WITH conversion (convertType !== null) it's a real, expected outcome
+    // once earlier drags have converted away the last supply of a value —
+    // the caller treats null as "skip this leaf, best-effort".
+    return null;
+  };
+
+  let leaves = [...degree.entries()].filter(([, d]) => d <= 1).map(([k]) => k);
+  while (leaves.length > 0) {
+    const lk = leaves.pop();
+    if (pruned.has(lk)) continue;
+    const leaf = cellOf.get(lk);
+    if (board.get(leaf.x, leaf.y) !== targetBoard.get(leaf.x, leaf.y)) {
+      const needed = targetBoard.get(leaf.x, leaf.y);
+      const path = bfsFindDonor(leaf, needed);
+      if (path !== null) {
+        // path runs leaf -> ... -> donor; reverse so index0 = donor (drag
+        // start) and the drag ends AT the leaf, delivering donor's value
+        // there via the same swap-chain semantics used everywhere else.
+        const dragPath = [...path].reverse();
+        // --convert (see doc comment above): ONLY the first drag actually
+        // generated applies conversion, via the SAME applyDragSwap used by
+        // single-drag mode (touchIndex = path length BEFORE this move,
+        // 1-indexed) — the picked-up rune at dragPath[0] is never a swap
+        // destination, so it always still rides unconverted to the leaf.
+        const applyConvert = convertType !== null && drags.length === 0;
+        let cur = dragPath[0];
+        const moves = [];
+        for (let i = 1; i < dragPath.length; i++) {
+          const nxt = dragPath[i];
+          if (applyConvert) applyDragSwap(board, cur.x, cur.y, nxt.x, nxt.y, i, convertType, convertCount);
+          else board.swap(cur.x, cur.y, nxt.x, nxt.y);
+          moves.push(dirName(nxt.x - cur.x, nxt.y - cur.y));
+          cur = nxt;
+        }
+        drags.push({startX: dragPath[0].x, startY: dragPath[0].y, path: dragPath, moves});
+      }
+    }
+    pruned.add(lk);
+    for (const nk of treeAdj.get(lk)) {
+      if (pruned.has(nk)) continue;
+      degree.set(nk, degree.get(nk) - 1);
+      if (degree.get(nk) <= 1) leaves.push(nk);
+    }
+  }
+  return {drags, board};
 }
 
 /**
@@ -2323,21 +2872,27 @@ function solveMaxFirstCombos(board, options = {}) {
   const reserveTypes = options.reserveTypes ?? [];
   const noSolvableTypes = options.noSolvableTypes ?? [];
   const hazardPositions = options.hazardPositions ?? null;
+  const minFirstAttrCombos = options.minFirstAttrCombos ?? 0;
+  const exactFirstAttrCombos = options.exactFirstAttrCombos ?? false;
+  const convertType = options.convertType ?? null;
+  const convertCount = options.convertCount ?? 0;
+  const wantGroupType = options.wantGroupType ?? null;
+  const wantGroupSize = options.wantGroupSize ?? 0;
   const bound = computeMaxFirstCombosBound(board, options);
 
   const dora = new DoraSolver(board, {
     beamWidth: options.beamWidth ?? 200, maxPath: options.maxPath ?? 30,
-    sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: options.priorityCells ?? [], startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+    sealedColumns, flags, minFirstCombos: bound, minFirstAttrCombos, exactFirstAttrCombos,
+    priorityCells: options.priorityCells ?? [], startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount, wantGroupType, wantGroupSize,
   }).solve();
   let best = dora, achieved = dora.firstCombos;
 
   for (let n = bound; n > achieved; n--) {
     const res = new TargetPlanner(board, {
-      sealedColumns, flags, minFirstCombos: n,
+      sealedColumns, flags, minFirstCombos: n, minFirstAttrCombos, exactFirstAttrCombos,
       beamWidth: options.plannerBeamWidth ?? 300,
       maxPath: options.plannerMaxPath ?? 60,
-      startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+      startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount,
     }).solve();
     if (res.solution) { best = res.solution; achieved = n; break; }
   }
@@ -2346,5 +2901,5 @@ function solveMaxFirstCombos(board, options = {}) {
 
 // Export for use in content script
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE};
+  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, decomposeRearrangement, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap};
 }

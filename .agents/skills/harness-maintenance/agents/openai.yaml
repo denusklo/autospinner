@@ -1,6 +1,7 @@
-# Status: SKELETON
-# Purpose/readers/source: UI metadata for the harness-maintenance skill; SKILL.md is authoritative.
-# Remaining: re-check values after SKILL.md is complete.
+# Status: COMPLETE
+# Purpose: UI metadata for the harness-maintenance skill.
+# Readers: Codex skill discovery UI and harness reviewers.
+# Source of truth: ../SKILL.md; this file supplies presentation metadata only.
 # Related: ../SKILL.md
 interface:
   display_name: "Harness Maintenance"

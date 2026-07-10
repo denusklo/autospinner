@@ -176,7 +176,7 @@ The harness validator enforces byte/line ceilings, broken-link detection, missin
 
 ### Detection mechanism
 
-- `AGENTS.md` over 300 lines or 32 KiB: fail.
+- `AGENTS.md` over 300 lines or 24 KiB: fail. The separate Codex product default is a 32 KiB combined project-instruction ceiling, not this harness budget.
 - `PITFALLS.md` over 400 lines, or three records sharing one root-cause tag: compaction required.
 - Missing local Markdown target, duplicate pitfall ID, invalid JSON/TOML, or empty permanent mechanism: fail.
 - A hard-coded regression count in the Codex router: fail review.
@@ -340,4 +340,3 @@ This diagnosis is accepted as the specification for subsequent harness work when
 - Dirty legacy files are preserved.
 - No global configuration is changed.
 - Every limitation is carried into the final verification report.
-

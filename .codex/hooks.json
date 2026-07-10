@@ -1,16 +1,31 @@
 {
-  "_harness": {
-    "status": "SKELETON",
-    "purpose": "Repository lifecycle guards; disabled in config until implementation and tests pass.",
-    "readers": "Codex runtime and harness reviewers",
-    "source_of_truth": "docs/codex-harness/01-HARNESS-LEAK-DIAGNOSIS.md",
-    "remaining": [
-      "Add PreToolUse boundary and destructive-command guard",
-      "Add Stop completion-evidence guard",
-      "Remove this temporary metadata before enabling hooks"
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|shell_command|exec_command|apply_patch|Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $(git rev-parse --show-toplevel)/.codex/hooks/pre-tool-use-guard.js",
+            "commandWindows": "node C:\\Projects\\autospinner\\.codex\\hooks\\pre-tool-use-guard.js",
+            "timeout": 10,
+            "statusMessage": "Checking autospinner repository safety policy"
+          }
+        ]
+      }
     ],
-    "related": ".codex/hooks/README.md"
-  },
-  "hooks": {}
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $(git rev-parse --show-toplevel)/.codex/hooks/completion-evidence-guard.js",
+            "commandWindows": "node C:\\Projects\\autospinner\\.codex\\hooks\\completion-evidence-guard.js",
+            "timeout": 10,
+            "statusMessage": "Checking completion evidence"
+          }
+        ]
+      }
+    ]
+  }
 }
-

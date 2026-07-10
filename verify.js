@@ -1,7 +1,7 @@
 // Regression + verification suite for algorithm.js (run: `node verify.js`)
 // This is the canonical check required by CLAUDE.md R2 before shipping any
 // algorithm.js change. Exit code 0 = all pass.
-const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE} =
+const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, decomposeRearrangement, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap} =
   require('./algorithm.js');
 
 let failures = 0;
@@ -883,6 +883,71 @@ const fh4 = new DoraSolver(mk([
 const fh4Independent = BoardSimulator.resolve(fh4.board, {reserveTypes: [0]});
 check('FH4 DoraSolver never returns a reserve-violating board', fh4.moves.length === 0 || !fh4Independent.reserveViolated, true);
 
+// --- Cursed runes (P37, corrected P38 — User live-corrected: "the curse
+// badge will follow the rune unlike fire-hazard mechanic"). PER-RUNE
+// travelling status (CURSE_BASE + baseType, same in-band family as shield/
+// FROZEN), matches and dissolves completely normally, but a board where the
+// cursed cell's rune actually gets swept into ANY wave's dissolve — even a
+// LATER cascade wave the cursed rune only reaches via gravity, not the
+// wave it started in — is forbidden as an answer. CU3 below is the exact
+// live-observed regression: a positional model missed this because the
+// specific rune moves to a new coordinate the positional check never
+// watches. ---
+
+// CU1: a run of 3 cursed Waters matches NORMALLY (not blocked/trimmed,
+// unlike FROZEN) and, being swept, curseViolated=true.
+const cu1 = mk([
+  [CURSE_BASE + 0, CURSE_BASE + 0, CURSE_BASE + 0, 1, 2, 3],
+  [1, 2, 3, 4, 5, 0],
+  [2, 3, 4, 5, 0, 1],
+  [3, 4, 5, 0, 1, 2],
+  [4, 5, 0, 1, 2, 3],
+]);
+const cu1r = BoardSimulator.resolve(cu1);
+check('CU1 cursed runes match normally (group not blocked/trimmed)', cu1r.groups[0].cells.length, 3);
+check('CU1 group type is the base color, not a distinct type', cu1r.groups[0].type, 0);
+check('CU1 curseViolated=true when the cursed rune is swept into a dissolve', cu1r.curseViolated, true);
+
+// CU2: not violated when the cursed rune is never touched by any group,
+// even though an UNRELATED combo dissolves elsewhere on the same board.
+const cu2 = mk([
+  [1, 1, 1, 2, 3, 4],
+  [2, 3, 4, 5, 0, 1],
+  [3, 4, 5, 0, 1, CURSE_BASE + 2],
+  [4, 5, 0, 1, 2, 3],
+  [5, 0, 1, 2, 3, 4],
+]);
+const cu2r = BoardSimulator.resolve(cu2);
+check('CU2 not violated when the cursed rune is never touched', cu2r.curseViolated, false);
+check('CU2 unrelated combo elsewhere still resolves normally', cu2r.totalCombos, 1);
+
+// CU3: THE live-observed regression. Wave 1 clears a vertical Fire triple in
+// col2 (rows 1-3); gravity then drops the cursed Water sitting at (2,0) down
+// to (2,3), where it joins a horizontal Water triple with the UNTOUCHED
+// Waters already at (1,3)/(3,3) — a SECOND wave the cursed rune only reaches
+// via gravity, not its starting position. A positional hazardPositions
+// check watching (2,0) would MISS this entirely (curse never dissolves at
+// its original coordinate) — curseViolated must catch it by rune identity.
+const cu3 = mk([
+  [1, 3, CURSE_BASE + 0, 4, 5, 2],
+  [2, 4, 1, 5, 3, 1],
+  [3, 5, 1, 2, 4, 3],
+  [4, 0, 1, 0, 5, 4],
+  [5, 1, 2, 3, 0, 5],
+]);
+const cu3r = BoardSimulator.resolve(cu3);
+check('CU3 the cascade-relocated cursed rune IS caught in the second wave', cu3r.curseViolated, true);
+check('CU3 confirms this is genuinely a two-wave cascade, not a first-wave miss', cu3r.chains, 2);
+
+// CU4: DoraSolver never returns a board that dissolves the cursed rune, in
+// ANY wave, even though the board's pre-existing arrangement (0 moves)
+// would violate it if left untouched.
+const cu4Raw = BOARDS[1].map(r => [...r]);
+cu4Raw[0][0] = CURSE_BASE + cu4Raw[0][0];
+const cu4 = new DoraSolver(mk(cu4Raw), {beamWidth: 200, maxPath: 20}).solve();
+const cu4Independent = BoardSimulator.resolve(cu4.board);
+check('CU4 DoraSolver never returns a curse-violating board', cu4.moves.length === 0 || !cu4Independent.curseViolated, true);
+
 // --- TargetPlanner.planHaveTargets/solveHave (P32/P33, User-requested
 // 2026-07-10): requiring several DIFFERENT types to each dissolve
 // simultaneously in wave 1 is a much tighter target than DoraSolver's
@@ -993,6 +1058,426 @@ const pwSub = pwCA.solveClearAll(pwCA.planClearAllTargets());
 check('PW4 targetsOverride reproduces the planned-targets run',
   [pwSub.reason, pwSub.solution && pwSub.solution.comboCount],
   [pwFull.reason, pwFull.solution && pwFull.solution.comboCount]);
+
+// --- First-wave ATTRIBUTE combos (首消N屬, --first-attr-combos): wave-1
+// combo groups of any NON-Heart type; repeats of one attribute count and
+// Heart groups are neither counted nor forbidden. ---
+
+// AC1: resolve() counts only non-Heart wave-1 groups. Row 0 holds a Heart
+// triple and a Water triple; every column falls by exactly 1 so no cascade
+// can form (F12).
+const acResolve = BoardSimulator.resolve(mk([
+  [5,5,5,0,0,0],
+  [1,2,3,4,1,2],
+  [2,3,4,1,2,3],
+  [3,4,1,2,3,4],
+  [4,1,2,3,4,1],
+]));
+check('AC1 firstCombos counts both groups', acResolve.firstCombos, 2);
+check('AC1 firstAttrCombos counts only the non-Heart group', acResolve.firstAttrCombos, 1);
+
+// AC2/AC3: DoraSolver honors the attr target (>= and exact modes) and stays
+// honest vs an independent resolve, on a heart-heavy board where heart
+// combos are the cheap option.
+const acBoard = () => mk([
+  [5,5,0,5,5,1],
+  [5,0,1,2,3,4],
+  [0,1,2,3,4,5],
+  [1,2,3,4,5,0],
+  [2,3,4,5,0,1],
+]);
+const acSol = new DoraSolver(acBoard(), {beamWidth: 300, maxPath: 20, minFirstAttrCombos: 2}).solve();
+check('AC2 solution meets the attr target', acSol.firstAttrCombos >= 2, true);
+check('AC2 firstAttrCombos honest vs independent resolve',
+  BoardSimulator.resolve(acSol.board).firstAttrCombos, acSol.firstAttrCombos);
+const acExact = new DoraSolver(acBoard(), {beamWidth: 300, maxPath: 20, minFirstAttrCombos: 1, exactFirstAttrCombos: true}).solve();
+check('AC3 exact mode returns exactly N attr combos', acExact.firstAttrCombos, 1);
+
+// AC4: composes with firstWaveNoTypes — attr combos must come from the
+// remaining attribute types when one is banned from wave 1.
+const acNo = new DoraSolver(acBoard(), {beamWidth: 400, maxPath: 20, minFirstAttrCombos: 2, firstWaveNoTypes: [0]}).solve();
+const acNoSim = BoardSimulator.resolve(acNo.board);
+check('AC4 attr target met with a banned attribute type',
+  acNoSim.firstAttrCombos >= 2 && acNoSim.firstClearedByType[0] === 0, true);
+
+// AC5: TargetPlanner constructs non-Heart combos only when the attr demand
+// is set (Heart excluded from color assignment).
+const acTargets = new TargetPlanner(acBoard(), {minFirstCombos: 2, minFirstAttrCombos: 2}).planTargets();
+check('AC5 planner targets exist and never assign Heart',
+  acTargets.length > 0 && acTargets.every(t => t.every(c => c.type !== 5)), true);
+
+// --- Touch-conversion card skill (--convert TYPE:N): the first N runes the
+// finger TOUCHES while dragging (every move's destination cell, NOT the
+// picked-up start cell) turn into TYPE as touched, before the swap displaces
+// them. The picked-up rune itself is never converted and always rides
+// unconverted to wherever the drag ends. ---
+
+// TC1: straight non-revisiting path, N < path length. Board is a simple
+// gradient with no accidental matches so we can read swap results directly.
+// Row: [0,1,2,3,4,5] at y=0; drag (0,0)->(1,0)->(2,0)->(3,0) (3 moves),
+// convert to type 3 (Light), count=2.
+const tcBoard1 = () => mk([
+  [0,1,2,3,4,5],
+  [1,2,3,4,5,0],
+  [2,3,4,5,0,1],
+  [3,4,5,0,1,2],
+  [4,5,0,1,2,3],
+]);
+{
+  const b = tcBoard1();
+  let cur = { x: 0, y: 0 };
+  const moves = [[1,0],[2,0],[3,0]];
+  let touchIndex = 1;
+  // convertType=5 chosen to differ from every natural shift value in this
+  // row ([0,1,2,3,4,5]) so a "not converted" cell is distinguishable from a
+  // "converted" one, not a coincidental match.
+  for (const [nx, ny] of moves) {
+    applyDragSwap(b, cur.x, cur.y, nx, ny, touchIndex, 5, 2);
+    cur = { x: nx, y: ny };
+    touchIndex++;
+  }
+  // touch#1=(1,0) converts, touch#2=(2,0) converts, touch#3=(3,0) does not.
+  // Natural shift (no conversion) would give: (0,0)=orig(1,0)=1, (1,0)=orig(2,0)=2,
+  // (2,0)=orig(3,0)=3, (3,0)=orig(0,0)=0(held). With conversion: (0,0) and
+  // (1,0) receive CONVERTED touches -> both become 5; (2,0) untouched-by-N
+  // keeps the natural shift value (orig(3,0)=3); (3,0) = held rune = 0.
+  check('TC1 touch#1 cell converted', b.get(0, 0), 5);
+  check('TC1 touch#2 cell converted', b.get(1, 0), 5);
+  check('TC1 touch#3 cell NOT converted (beyond count, keeps natural shift value)', b.get(2, 0), 3);
+  check('TC1 held rune rides unconverted to the final cell', b.get(3, 0), 0);
+}
+
+// TC2: N >= path length — entire touched sequence (all but the final held
+// cell) converts.
+{
+  const b = tcBoard1();
+  let cur = { x: 0, y: 0 };
+  const moves = [[1,0],[2,0]];
+  let touchIndex = 1;
+  for (const [nx, ny] of moves) {
+    applyDragSwap(b, cur.x, cur.y, nx, ny, touchIndex, 4, 10);
+    cur = { x: nx, y: ny };
+    touchIndex++;
+  }
+  check('TC2 both touched cells converted when N exceeds path length', [b.get(0, 0), b.get(1, 0)], [4, 4]);
+  check('TC2 held rune (original type 0) unconverted at final cell', b.get(2, 0), 0);
+}
+
+// TC3: N = Infinity ("max") behaves like TC2 for any path length.
+{
+  const b = tcBoard1();
+  let cur = { x: 0, y: 0 };
+  const moves = [[1,0],[2,0],[3,0],[4,0]];
+  let touchIndex = 1;
+  for (const [nx, ny] of moves) {
+    applyDragSwap(b, cur.x, cur.y, nx, ny, touchIndex, 2, Infinity);
+    cur = { x: nx, y: ny };
+    touchIndex++;
+  }
+  check('TC3 max mode converts every touched cell', [b.get(0,0), b.get(1,0), b.get(2,0), b.get(3,0)], [2, 2, 2, 2]);
+  check('TC3 held rune unconverted at final cell', b.get(4, 0), 0);
+}
+
+// TC4: revisit within budget — touching the SAME cell twice, both within N,
+// still ends up converted (touch is counted by MOVE, not distinct cell).
+{
+  const b = tcBoard1();
+  // (0,0) -> (1,0) -> (0,0) : touch#1=(1,0), touch#2=(0,0) [revisit].
+  applyDragSwap(b, 0, 0, 1, 0, 1, 5, 2);
+  applyDragSwap(b, 1, 0, 0, 0, 2, 5, 2);
+  check('TC4 revisited cell converted on its second touch', b.get(1, 0), 5);
+  check('TC4 held rune rides back to the revisited start cell', b.get(0, 0), 0);
+}
+
+// TC5: DoraSolver end-to-end — a solved path's final board reflects
+// conversion (composes with the ordinary weight/combo scoring with no extra
+// steering code: conversion is baked into the board before BoardSimulator
+// ever sees it).
+{
+  const tcSol = new DoraSolver(tcBoard1(), { beamWidth: 200, maxPath: 4, convertType: 3, convertCount: 2 }).solve();
+  check('TC5 solver path well-formed', tcSol.moves.length > 0, true);
+  // A touch at path[i] (i>=1) converts its ORIGINAL content, which then
+  // shifts BACKWARD to path[i-1] by the swap that follows — so the cells
+  // that end up SHOWING the converted value are path[0..N-1] (start cell
+  // included), never path[N..]; the final path cell always holds the
+  // original held rune, exempt regardless of N (mirrors the TC1 derivation).
+  const tcFinal = tcSol.path[tcSol.path.length - 1];
+  const tcConverted = tcSol.path.slice(0, Math.min(2, tcSol.path.length - 1))
+    .filter(p => !(p.x === tcFinal.x && p.y === tcFinal.y));
+  check('TC5 first N path positions (incl. start) are the converted type on the final board',
+    tcConverted.length > 0 && tcConverted.every(p => tcSol.board.get(p.x, p.y) === 3), true);
+  check('TC5 final held cell is NOT forced to the converted type',
+    tcSol.board.get(tcFinal.x, tcFinal.y) !== 3, true);
+}
+
+// --- Want-group target (--want-group TYPE:N): BEST-EFFORT optional steering
+// for "a match group of EXACTLY N cells of TYPE, somewhere across EVERY
+// cascade wave" — never a mandatory demand, never aborts. ---
+
+// WG1: cross-wave — reuses U3b's cascade fixture, whose wave-2 group (type 4,
+// 3 cells) only exists AFTER the wave-1 L-shape clears and gravity drops new
+// neighbors into place. Proves sim.groups (what --want-group checks) spans
+// every wave, not just wave 1.
+{
+  const cascade2 = mk([
+    [1,2,3,3,1,2],
+    [2,3,4,5,2,3],
+    [5,1,0,1,3,4],
+    [4,4,0,2,4,5],
+    [0,0,0,3,5,1],
+  ]);
+  const cr2 = BoardSimulator.resolve(cascade2);
+  check('WG1 wave-2 group (type 4, 3 cells) present in sim.groups', cr2.groups.some(g => g.type === 4 && g.cells.length === 3), true);
+  check('WG1 that group is NOT among the wave-1 groups (proves it is genuinely wave-2)',
+    cr2.groups.slice(0, cr2.firstCombos).some(g => g.type === 4 && g.cells.length === 3), false);
+}
+
+// WG2: deterministic construction — composes with --convert (P46): forcing
+// 4 touched cells (incl. start, count>=path length) to type 0 along a
+// straight row produces exactly one 4-cell group of that type.
+{
+  const b = tcBoard1();
+  let cur = { x: 0, y: 0 };
+  const moves = [[1,0],[2,0],[3,0]];
+  let touchIndex = 1;
+  for (const [nx, ny] of moves) {
+    applyDragSwap(b, cur.x, cur.y, nx, ny, touchIndex, 0, 4);
+    cur = { x: nx, y: ny };
+    touchIndex++;
+  }
+  const wgSim = BoardSimulator.resolve(b);
+  check('WG2 convert-then-want-group composition produces the exact group', wgSim.groups.some(g => g.type === 0 && g.cells.length === 4), true);
+}
+
+// WG3: DoraSolver end-to-end — pinned start + convertType/convertCount make
+// the qualifying path essentially the only good option in a tiny search
+// space, so steering should find it and wantGroupOk should hold on the
+// final board (checked independently via resolve(), not sc internals).
+{
+  const wgSol = new DoraSolver(tcBoard1(), {
+    beamWidth: 100, maxPath: 3, startCells: [{ x: 0, y: 0 }],
+    convertType: 0, convertCount: 4, wantGroupType: 0, wantGroupSize: 4,
+  }).solve();
+  check('WG3 solver path well-formed', wgSol.moves.length > 0, true);
+  const wgSim2 = BoardSimulator.resolve(wgSol.board);
+  check('WG3 final board satisfies the want-group target', wgSim2.groups.some(g => g.type === 0 && g.cells.length === 4), true);
+}
+
+// WG4: best-effort — an UNREACHABLE size (larger than any possible group on
+// a 5x6 board) must never abort/throw/return null; solve() still returns a
+// well-formed fallback solution (same "optional target, not mandatory
+// demand" fallback chain as minFirstCombos/minFirstAttrCombos).
+{
+  const wgImpossible = new DoraSolver(tcBoard1(), {
+    beamWidth: 100, maxPath: 5, wantGroupType: 0, wantGroupSize: 25,
+  }).solve();
+  check('WG4 unreachable want-group target does not break solve() (best-effort fallback)',
+    typeof wgImpossible === 'object' && Array.isArray(wgImpossible.moves) && wgImpossible.board instanceof Board, true);
+}
+
+// --- 排珠 rearrangement mode (RearrangeSolver / decomposeRearrangement,
+// P50): multi-drag repositioning with no dissolve until a final full
+// cascade. The ground-truth check that matters most is REA4/REA6: replaying
+// the decomposed drag sequence must EXACTLY reproduce the chosen target
+// board (this is what a real device execution needs to be correct). ---
+
+const REA_BOARD = () => mk([
+  [0, 1, 0, 2, 0, 3],
+  [2, 3, 4, 5, 1, 2],
+  [3, 4, 5, 1, 2, 3],
+  [4, 5, 1, 2, 3, 4],
+  [5, 1, 2, 3, 4, 5],
+]);
+
+// REA1: movableComponents excludes NO_SWAP cells and finds the right count.
+{
+  const flags = Array.from({length: 5}, () => Array(6).fill(0));
+  flags[0][0] = CELL_FLAGS.NO_SWAP;
+  const rs = new RearrangeSolver(REA_BOARD(), { flags });
+  const comps = rs.movableComponents();
+  const allMovable = comps.flat();
+  check('REA1 NO_SWAP cell excluded from every component', allMovable.some(c => c.x === 0 && c.y === 0), false);
+  check('REA1 remaining 29 cells still form one connected component', comps.filter(c => c.length > 1).length, 1);
+}
+
+// REA2: a full NO_SWAP wall (columns 2+3) splits the board into two
+// disconnected 10-cell components.
+{
+  const flags2 = Array.from({length: 5}, () => Array(6).fill(0));
+  for (let y = 0; y < 5; y++) { flags2[y][2] = CELL_FLAGS.NO_SWAP; flags2[y][3] = CELL_FLAGS.NO_SWAP; }
+  const rs2 = new RearrangeSolver(REA_BOARD(), { flags: flags2 });
+  const comps2 = rs2.movableComponents().filter(c => c.length > 0);
+  check('REA2 wall splits movable region into 2 components', comps2.length, 2);
+  check('REA2 each side has 10 cells', comps2.map(c => c.length).sort(), [10, 10]);
+}
+
+// REA3: RearrangeSolver composes with --clear-all — finds an arrangement
+// that clears all 3 Waters in wave 1, something the ORIGINAL (unrearranged)
+// board cannot do (Waters are scattered with no run of 3).
+{
+  const board = REA_BOARD();
+  const baselineSim = BoardSimulator.resolve(board.clone());
+  check('REA3 baseline board has no wave-1 matches at all', baselineSim.totalCombos, 0);
+  const rs3 = new RearrangeSolver(board, { clearTypes: [0], rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const result3 = rs3.solve();
+  const sim3 = BoardSimulator.resolve(result3.board.clone());
+  check('REA3 rearranged board clears all 3 waters in wave 1', sim3.firstClearedByType[0], 3);
+}
+
+// REA4: decomposeRearrangement's drag sequence, replayed via the SAME
+// swap-chain semantics used everywhere else in this project, EXACTLY
+// reproduces the chosen target board (ground truth for real execution).
+{
+  const board = REA_BOARD();
+  const rs4 = new RearrangeSolver(board, { wantGroupType: 1, wantGroupSize: 5, rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const result4 = rs4.solve();
+  const decomposed4 = decomposeRearrangement(board, result4.board, result4.movableCells);
+  const drags4 = decomposed4.drags;
+  const replay = board.clone();
+  for (const d of drags4) for (let i = 1; i < d.path.length; i++) replay.swap(d.path[i - 1].x, d.path[i - 1].y, d.path[i].x, d.path[i].y);
+  let matches = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (replay.get(x, y) !== result4.board.get(x, y)) matches = false;
+  check('REA4 replayed drag sequence exactly reproduces the target board', matches, true);
+  check('REA4 at least one drag was planned (board actually changed)', drags4.length > 0, true);
+  check('REA4 no-convert: returned board equals the target board', JSON.stringify(decomposed4.board.grid), JSON.stringify(result4.board.grid));
+}
+
+// REA5: no planned drag ever touches an immovable (NO_SWAP) cell, and that
+// cell's value is completely untouched in the final board.
+{
+  const flags5 = Array.from({length: 5}, () => Array(6).fill(0));
+  flags5[2][3] = CELL_FLAGS.NO_SWAP;
+  const board5 = REA_BOARD();
+  const rs5 = new RearrangeSolver(board5, { flags: flags5, clearTypes: [0], rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const result5 = rs5.solve();
+  check('REA5 immovable cell value unchanged in the target board', result5.board.get(3, 2), board5.get(3, 2));
+  const drags5 = decomposeRearrangement(board5, result5.board, result5.movableCells).drags;
+  check('REA5 no drag path ever passes through the immovable cell', drags5.every(d => d.path.every(p => !(p.x === 3 && p.y === 2))), true);
+  const replay5 = board5.clone();
+  for (const d of drags5) for (let i = 1; i < d.path.length; i++) replay5.swap(d.path[i - 1].x, d.path[i - 1].y, d.path[i].x, d.path[i].y);
+  let matches5 = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (replay5.get(x, y) !== result5.board.get(x, y)) matches5 = false;
+  check('REA5 replay still exact with an immovable cell present', matches5, true);
+}
+
+// REA6: multi-component decomposition — drags stay confined to their own
+// component (a drag path never crosses the NO_SWAP wall), and replay is
+// exact on BOTH sides at once.
+{
+  const flags6 = Array.from({length: 5}, () => Array(6).fill(0));
+  for (let y = 0; y < 5; y++) { flags6[y][2] = CELL_FLAGS.NO_SWAP; flags6[y][3] = CELL_FLAGS.NO_SWAP; }
+  const board6 = mk([
+    [0, 1, 9, 9, 2, 3],
+    [1, 0, 9, 9, 3, 2],
+    [0, 1, 9, 9, 2, 3],
+    [1, 0, 9, 9, 3, 2],
+    [0, 1, 9, 9, 2, 3],
+  ]);
+  const rs6 = new RearrangeSolver(board6, { flags: flags6, wantGroupType: 0, wantGroupSize: 5, rearrangeBeamWidth: 200, rearrangeMaxSteps: 20 });
+  const result6 = rs6.solve();
+  const drags6 = decomposeRearrangement(board6, result6.board, result6.movableCells).drags;
+  check('REA6 no drag path ever crosses the NO_SWAP wall (cols 2-3)', drags6.every(d => d.path.every(p => p.x !== 2 && p.x !== 3)), true);
+  const replay6 = board6.clone();
+  for (const d of drags6) for (let i = 1; i < d.path.length; i++) replay6.swap(d.path[i - 1].x, d.path[i - 1].y, d.path[i].x, d.path[i].y);
+  let matches6 = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (replay6.get(x, y) !== result6.board.get(x, y)) matches6 = false;
+  check('REA6 replay exact across two disconnected components at once', matches6, true);
+}
+
+// REA7-9: --rearrange + --convert composition (2026-07-10, User-requested):
+// ONLY the first physical drag converts its touched (left-behind) cells;
+// convertCount may be Infinity ("max"). The returned `board` must reflect
+// the REAL post-conversion arrangement, not RearrangeSolver's target.
+
+// REA7: convertCount=Infinity ("max") on the first drag — every cell the
+// first drag's finger passes through and leaves behind becomes convertType,
+// while the picked-up rune still rides unconverted to wherever it lands.
+{
+  const board7 = REA_BOARD();
+  const rs7 = new RearrangeSolver(board7, { wantGroupType: 1, wantGroupSize: 5, rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const result7 = rs7.solve();
+  const decomposed7 = decomposeRearrangement(board7, result7.board, result7.movableCells, 3, Infinity);
+  const drags7 = decomposed7.drags;
+  check('REA7 at least one drag was planned', drags7.length > 0, true);
+  const firstDrag = drags7[0];
+  // Replay the sequence manually via the SAME applyDragSwap semantics used
+  // by the function itself (independent check, not trusting its own return).
+  const replay7 = board7.clone();
+  drags7.forEach((d, di) => {
+    let cur = d.path[0];
+    for (let i = 1; i < d.path.length; i++) {
+      const nxt = d.path[i];
+      if (di === 0) applyDragSwap(replay7, cur.x, cur.y, nxt.x, nxt.y, i, 3, Infinity);
+      else replay7.swap(cur.x, cur.y, nxt.x, nxt.y);
+      cur = nxt;
+    }
+  });
+  check('REA7 independently-replayed board matches the returned board', JSON.stringify(replay7.grid), JSON.stringify(decomposed7.board.grid));
+  // Every cell of the FIRST drag EXCEPT its final (held-rune) cell must be
+  // convertType (3) — checked right after drag 1 completes, NOT on the
+  // fully-final board (a LATER drag sharing the same component can
+  // legitimately swap back through a cell drag 1 left behind).
+  const afterDrag1 = board7.clone();
+  let curD1 = firstDrag.path[0];
+  for (let i = 1; i < firstDrag.path.length; i++) {
+    const nxt = firstDrag.path[i];
+    applyDragSwap(afterDrag1, curD1.x, curD1.y, nxt.x, nxt.y, i, 3, Infinity);
+    curD1 = nxt;
+  }
+  const heldFinal = firstDrag.path[firstDrag.path.length - 1];
+  const leftBehindOk = firstDrag.path.slice(0, -1).every(p => afterDrag1.get(p.x, p.y) === 3);
+  check('REA7 every left-behind cell of the first drag converted (max mode)', leftBehindOk, true);
+  check('REA7 held rune at the first drag\'s final cell is NOT forced to convertType', afterDrag1.get(heldFinal.x, heldFinal.y) === board7.get(firstDrag.startX, firstDrag.startY), true);
+}
+
+// REA8: a FINITE convertCount only converts the first drag's first N
+// touches; a second drag (if any) is completely unaffected by conversion.
+{
+  const board8 = REA_BOARD();
+  const rs8 = new RearrangeSolver(board8, { clearTypes: [0], rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const result8 = rs8.solve();
+  const decomposed8 = decomposeRearrangement(board8, result8.board, result8.movableCells, 4, 1);
+  const drags8 = decomposed8.drags;
+  if (drags8.length >= 2) {
+    // Second+ drags: replaying WITHOUT any conversion from the point right
+    // after drag 1 must match the returned board exactly on those cells —
+    // i.e. drags[1..] are plain swaps, not touched by convertType at all.
+    const afterFirst = board8.clone();
+    const d0 = drags8[0];
+    let cur0 = d0.path[0];
+    for (let i = 1; i < d0.path.length; i++) {
+      const nxt = d0.path[i];
+      applyDragSwap(afterFirst, cur0.x, cur0.y, nxt.x, nxt.y, i, 4, 1);
+      cur0 = nxt;
+    }
+    for (let di = 1; di < drags8.length; di++) {
+      const d = drags8[di];
+      let cur = d.path[0];
+      for (let i = 1; i < d.path.length; i++) {
+        const nxt = d.path[i];
+        afterFirst.swap(cur.x, cur.y, nxt.x, nxt.y);
+        cur = nxt;
+      }
+    }
+    check('REA8 only the first drag converts; later drags are plain swaps', JSON.stringify(afterFirst.grid), JSON.stringify(decomposed8.board.grid));
+  } else {
+    check('REA8 skipped (fewer than 2 drags planned on this board/demand) — trivially consistent', true, true);
+  }
+}
+
+// REA9: conversion composes with --clear-all — the real (post-conversion)
+// board is what gets checked, and CAN legitimately clear MORE than the
+// original demand total (same "bonus, not requirement" rule as P48's
+// single-drag --convert + --clear-all fix) without being flagged wrong.
+{
+  const board9 = REA_BOARD();
+  const rs9 = new RearrangeSolver(board9, { clearTypes: [0], rearrangeBeamWidth: 400, rearrangeMaxSteps: 25 });
+  const result9 = rs9.solve();
+  const decomposed9 = decomposeRearrangement(board9, result9.board, result9.movableCells, 0, Infinity);
+  const sim9 = BoardSimulator.resolve(decomposed9.board.clone());
+  const origWaterTotal = board9.grid.reduce((n, row) => n + row.filter(v => v === 0).length, 0);
+  check('REA9 clear-all still satisfied on the REAL post-conversion board', sim9.firstClearedByType[0] >= origWaterTotal, true);
+}
 
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---
 const smoke = mk([[0,0,0,1,2,3],[1,2,3,4,5,0],[2,3,4,5,0,1],[3,4,5,0,1,2],[4,5,0,1,2,3]]);

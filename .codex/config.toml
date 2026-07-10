@@ -1,11 +1,11 @@
-# Status: SKELETON
-# Purpose: Repository-scoped Codex safety defaults and agent concurrency caps.
+# Status: COMPLETE
+# Purpose: Repository-scoped Codex safety defaults and bounded agent concurrency.
 # Readers: Codex runtime, Commander, and harness reviewers.
 # Source of truth: AGENTS.md and docs/codex-harness/01-HARNESS-LEAK-DIAGNOSIS.md.
-# Remaining: verify every key, enable hooks only after scripts pass tests, and document limitations.
+# Hooks are defined only in .codex/hooks.json. No project MCP server is added.
 
-sandbox_mode = "workspace-write"
-approval_policy = "on-request"
+sandbox_mode = 'workspace-write'
+approval_policy = 'on-request'
 
 [sandbox_workspace_write]
 network_access = false
@@ -15,5 +15,5 @@ max_depth = 1
 max_threads = 3
 
 [features]
-hooks = false
-
+hooks = true
+multi_agent = true

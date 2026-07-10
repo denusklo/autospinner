@@ -16,6 +16,36 @@
  *                                                # mode; overshoot rejected too)
  *   node phone/autospin.js --first-combos 7+     # at least 7 first-wave combos
  *   node phone/autospin.js --first-combos max    # highest achievable (never aborts)
+ *   node phone/autospin.js --first-attr-combos 6 # EXACTLY 6 first-wave ATTRIBUTE combos
+ *                                                # (首消N屬: non-Heart groups; repeats of one
+ *                                                # attribute count; Heart groups allowed but
+ *                                                # not counted). 6+ = at least 6. No max mode.
+ *   node phone/autospin.js --convert wood:5      # touch-conversion card skill: the first 5
+ *                                                # runes the finger TOUCHES while dragging
+ *                                                # (not the picked-up rune, which always keeps
+ *                                                # its own type) turn into Wood as touched.
+ *                                                # --convert water:max converts the whole path.
+ *   node phone/autospin.js --want-group water:5  # BEST-EFFORT (never aborts): want a match
+ *                                                # group of EXACTLY 5 Water cells somewhere
+ *                                                # across ANY cascade wave, not just wave 1.
+ *   node phone/autospin.js --rearrange            # 排珠: several SEPARATE drags, no dissolve
+ *                                                # until the stage timer expires (User-
+ *                                                # confirmed: unlimited drags, no gravity
+ *                                                # between releases, full cascade at time-up).
+ *                                                # Composes with --clear-all/--want-group/
+ *                                                # --first-combos/etc (same demand semantics,
+ *                                                # solved via best PERMUTATION not a drag
+ *                                                # path). Incompatible with --start/--end/
+ *                                                # --fire-route/--drag-from (no single-path
+ *                                                # meaning). --rearrange-beam N / --rearrange-
+ *                                                # steps N tune quality vs time (default
+ *                                                # 60/40, per movable component).
+ *   node phone/autospin.js --rearrange --convert wood:max
+ *                                                # --convert composes with --rearrange
+ *                                                # (User-confirmed): ONLY the FIRST physical
+ *                                                # drag converts its touched cells (the
+ *                                                # picked-up rune still never converts);
+ *                                                # count may be a number or max/all.
  *   node phone/autospin.js --first-runes 20      # clear EXACTLY 20 RUNES in the first wave
  *                                                # (楊玉環 "NUM N" boss: read N off the enemy
  *                                                # badge; distinct from combo COUNT)
@@ -51,7 +81,12 @@
  *                                                # local optimum, not a bug), TargetPlanner
  *                                                # CONSTRUCTS coverage the same way it does
  *                                                # for --clear-all (one small group per type,
- *                                                # not full clearance).
+ *                                                # not full clearance). Live example (P33):
+ *                                                # --first-wave-have=w,g,f,l,d (5 types,
+ *                                                # sealed cols 0/5) only got 2/5 via
+ *                                                # DoraSolver alone at --beam 6400; the
+ *                                                # TargetPlanner construction fix solved
+ *                                                # all 5 in ~11.6s (combos=6).
  *   node phone/autospin.js --clear-all heart      # first wave must dissolve EVERY
  *                                                # heart on the board (boss 首批消除
  *                                                # 所有X符石). Comma list for several
@@ -194,7 +229,7 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Board, BoardSimulator, DoraSolver, TargetPlanner, CELL_FLAGS, FROZEN, SHIELD_BASE } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, decomposeRearrangement, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
 const { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, defaultWorkers } = require('./parallel.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
@@ -260,9 +295,33 @@ const SIGNATURES = [
   { type: 0, thorn: false, electric: true, rgb: [191, 251, 250] }, // Electric rune (flicker phase B)
   // ICED pre-freeze state: still dissolves as its base element this turn, but
   // should be prioritized because survivors become FROZEN for later rounds.
-  { type: 4, thorn: false, iced: true, rgb: [168, 110, 225] },       // Iced Dark, live 2026-07-10
-  { type: 5, thorn: false, iced: true, rgb: [190, 140, 206] },       // Iced Heart, live 2026-07-10
-  { type: 0, thorn: false, iced: true, rgb: [115, 162, 217] },       // Iced Water, live 2026-07-10
+  // DISABLED 2026-07-10 (L51, PROJECT-FACTS P45): unlike every other
+  // calibration this session, these 3 had no "User-confirmed at (x,y)"
+  // citation — just a bare "live 2026-07-10" comment. A live board's plain
+  // Water cell (5,0) matched Iced Water by a WIDE, confident margin (dist
+  // 23.9 vs 51.2+ to any real Water variant — not a narrow tiebreak like the
+  // Dark/Heart pair), and the User confirmed they have never actually seen a
+  // genuine iced-then-frozen rune. Same root cause as L37 (frozen entries
+  // mislabeled at capture time): kept `disabled:true` with the historical
+  // rgb so a future GENUINELY confirmed sighting (one that later turns into
+  // a frozen shell, closing the loop end to end) can be compared and
+  // re-enabled, rather than losing the data and recalibrating from zero.
+  { type: 4, thorn: false, iced: true, disabled: true, rgb: [168, 110, 225] }, // Iced Dark, live 2026-07-10 — UNCONFIRMED, see disable note above
+  { type: 5, thorn: false, iced: true, disabled: true, rgb: [190, 140, 206] }, // Iced Heart, live 2026-07-10 — UNCONFIRMED, see disable note above
+  { type: 0, thorn: false, iced: true, disabled: true, rgb: [115, 162, 217] }, // Iced Water, live 2026-07-10 — UNCONFIRMED, see disable note above
+  // Dim plain-Water variant (live 2026-07-10, User-confirmed, L51): after
+  // disabling the unconfirmed Iced-Water entry above, this same cell's
+  // NEXT-nearest match was the disabled-adjacent-but-still-ENABLED "Frozen
+  // Fire shell round 1" signature (176,171,210, P16, dist 49.3, well under
+  // MAX_SIG_DIST) — worse than iced (would have blocked a normal Water from
+  // dissolving at all). The cell genuinely renders dimmer than the
+  // enhanced-Water cluster on this board (r+10/g-24/b-28 vs (118,193,239))
+  // by a wide, uniform margin, frame-stable across 8 captures — not
+  // animation flicker. No structural cause found (not a thorn/corner/edge
+  // positional effect: sibling row-0/col-5 cells read normally). Adding the
+  // measured value directly as a 3rd plain-Water reference point, same
+  // per-instance-variance pattern as L27/L47/L50.
+  { type: 0, thorn: false, rgb: [128.7, 164.8, 197.6] }, // Water (dim variant)
   // FROZEN rune (ice mechanic, P16). Two states: an ICED rune is fully normal
   // and dissolvable (dissolve it that round or it freezes!); if it survives a
   // spin round it becomes FROZEN for 3 rounds — can move/drag/pass-through
@@ -326,6 +385,35 @@ const SIGNATURES = [
   // (88,123,93)/(87,123,93) agree tightly, consistent with thorn darkening
   // the plain-shield rgb by roughly the same ratio seen on other types.
   { type: 2, thorn: true, shield: true, rgb: [88, 123, 93] }, // Wood + shield + thorn
+  // Shielded Dark (live 2026-07-10, User-confirmed on 9 cells, L47). Two
+  // distinct plain clusters on the same board (per-instance brightness
+  // variance, same phenomenon as L27's card badges), both dark%~0 like all
+  // shield variants. Without these entries the cells silently matched the
+  // ICED signatures (Dark~/Heart~) — wrong element AND wrong solver
+  // semantics. The thorn variant sits only ~20 raw units from live thorn-
+  // Heart cells — disambiguated by the r-b family discriminator in
+  // classify(), not by raw distance alone.
+  { type: 4, shield: true, rgb: [185, 112, 207] },             // Dark + shield (cluster A)
+  { type: 4, shield: true, rgb: [215, 151, 230] },             // Dark + shield (cluster B, brighter)
+  { type: 4, thorn: true, shield: true, rgb: [133, 114, 140] }, // Dark + shield + thorn
+  // Bright-drifted thorn palette (live 2026-07-10, L47): this stage renders
+  // thorn cells ~38 units brighter than the original thorn calibration —
+  // live confirmed Water*/Heart* cells sat dist 38.9 from their own
+  // signatures, close enough that the shield-Dark+thorn point above stole a
+  // real Water* cell by <1 unit. Second calibration points at the drifted
+  // values restore confident raw matches (the original points stay for the
+  // original stage/lighting).
+  { type: 0, thorn: true, rgb: [96, 121, 137] },   // Water + thorn (bright stage)
+  { type: 5, thorn: true, rgb: [143, 116, 123] },  // Heart + thorn (bright stage)
+  // Bright plain Wood+thorn (live 2026-07-10, User-confirmed, L50): a plain
+  // thorn-Wood cell measured (78,103,78) while its SIBLING on the same board
+  // measured (64,113,65) (spot-on the original Wood* signature) — per-
+  // instance brightness variance (L27 phenomenon), NOT a uniform stage
+  // drift. The bright instance sat 27.1 from Wood+shield+thorn vs 28.4 from
+  // plain Wood* — misread as shielded by 1.3 units. Whitish-pixel-fraction
+  // was probed as a shield discriminator and does NOT separate (plain
+  // Hearts overlap non-thorn shields); the signature point is the fix.
+  { type: 2, thorn: true, rgb: [78, 103, 78] },    // Wood + thorn (bright instance)
 ];
 const MAX_SIG_DIST = 60;
 
@@ -415,7 +503,7 @@ const distStr = c => (c.edgeNoClear ? c.dist.toFixed(4) : c.dist.toFixed(0));
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const cellLabel = c => c.hurricane ? 'Hurricane'
-  : (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.iced ? '~' : '') + (c.frozen ? '#' : '') + (c.noSolvable ? '%' : '') + (c.edgeNoClear ? '$' : '') + (c.shield ? '+' : '')) + (c.thorn ? '*' : '') + (c.go ? '@' : '');
+  : (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.iced ? '~' : '') + (c.frozen ? '#' : '') + (c.noSolvable ? '%' : '') + (c.edgeNoClear ? '$' : '') + (c.shield ? '+' : '') + (c.curse ? '&' : '')) + (c.thorn ? '*' : '') + (c.go ? '@' : '');
 
 // ---------- capture + recognition ----------
 
@@ -504,7 +592,7 @@ function detectHurricaneColumns(img) {
 function hurricaneCell(stats) {
   return {
     type: 0, thorn: false, electric: false, iced: false, frozen: false,
-    shield: false, noSolvable: false, edgeNoClear: false, hurricane: true,
+    shield: false, noSolvable: false, edgeNoClear: false, curse: false, hurricane: true,
     dist: 0, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct,
   };
 }
@@ -573,6 +661,54 @@ function hasGreenTintUnderFire(img, cx, cy) {
     }
   }
   return (green / n) > 0.02;
+}
+
+// "Curse" badge (new mechanic, live 2026-07-10, User-stated + live-measured):
+// a small circular badge in the cell's TOP-RIGHT corner — magenta/pink ring,
+// white background, red chrysanthemum-flower icon — distinct from the
+// pre-existing plain black-circle/white-butterfly badge on every OTHER cell
+// (P22: confirmed cosmetic, correctly ignored). User-confirmed semantics
+// match the fire-hazard mechanic exactly (P22/P23): dissolvable at a normal
+// match of 3+, but the dissolve should be AVOIDED across every cascade wave
+// (not just wave 1); fully draggable/pass-through, touching is fine. User
+// was NOT sure this stays locked to one element in future battles (this
+// capture: all 5 instances were on Dark runes, zero on any other element) —
+// so this is detected and modeled PER-CELL (like the fire-hazard overlay),
+// not as a type-global constraint, and merged into the SAME hazardPositions
+// mechanism rather than adding a new one. Live-measured badge-patch average
+// (offset +52,-52 from cell center, half=18): (206,101,167) on 4/5 samples;
+// the 5th sample (also thorn-sealed, whose overlay dims everything ~0.55x
+// per P5) measured (181,98,150), dist ~30 from the signature — still a
+// comfortable margin from the plain-badge cluster (measured (109-114,
+// 106-113,89-100) across 16 samples spanning thorn/non-thorn/every visible
+// element, dist ~120+ from the curse signature).
+const CURSE_BADGE_RGB = [206, 101, 167];
+const MAX_CURSE_BADGE_DIST = 55;
+// A HEART rune's own top-right lobe fills the badge patch with almost the
+// same pink as the curse badge (live 2026-07-10, L49): every Heart on a
+// curse-free board measured (239-241,130-133,199-202) — dist 54-59 from
+// CURSE_BADGE_RGB, straddling the 55 threshold (one Heart at 54.2 was
+// falsely flagged cursed). Fix: the patch must be NEARER the badge
+// signature than this heart-corner reference to count as a badge. A real
+// badge on a Heart still detects fine — the opaque badge replaces the
+// corner pixels (dist ~0-30 to the badge signature vs ~55-83 to this).
+const HEART_CORNER_RGB = [240, 131, 200];
+function curseBadgeStats(img, cx, cy) {
+  const bx = cx + 52, by = cy - 52;
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let dy = -18; dy <= 18; dy += 2) {
+    for (let dx = -18; dx <= 18; dx += 2) {
+      const i = img.off + ((by + dy) * img.w + (bx + dx)) * 4;
+      r += img.buf[i]; g += img.buf[i + 1]; b += img.buf[i + 2]; n++;
+    }
+  }
+  return [r / n, g / n, b / n];
+}
+function hasCurseOverlay(img, cx, cy) {
+  const rgb = curseBadgeStats(img, cx, cy);
+  const dBadge = Math.hypot(rgb[0] - CURSE_BADGE_RGB[0], rgb[1] - CURSE_BADGE_RGB[1], rgb[2] - CURSE_BADGE_RGB[2]);
+  const dHeartCorner = Math.hypot(rgb[0] - HEART_CORNER_RGB[0], rgb[1] - HEART_CORNER_RGB[1], rgb[2] - HEART_CORNER_RGB[2]);
+  return dBadge < MAX_CURSE_BADGE_DIST && dBadge < dHeartCorner;
 }
 
 function edgeNoClearOverlayStats(img, cx, cy) {
@@ -660,26 +796,35 @@ function classify(stats, skipGlow = false) {
   // Trust the dark-pixel metric when they disagree.
   const thorn = stats.darkPct > 0.2;
   let type = best.type;
-  // Dark+thorn vs Heart+thorn discriminator (live 2026-07-10, LESSONS L38,
-  // fixed further L39): whole-cell raw-RGB nearest-match is UNRELIABLE for
-  // this specific pair when the race is close. First version of this
-  // override applied UNCONDITIONALLY whenever the raw match landed on either
-  // signature — that regressed 2 live User-confirmed Heart+thorn cells whose
-  // raw distances clearly and correctly favored Heart (dist 7.3 vs 32.7) but
-  // whose g-b (-29) happened to sit just past the -25 cutoff, flipping a
-  // confidently-correct raw match to wrong. Fix: only invoke the g-b
-  // discriminator when the raw race between the two signatures is actually
-  // CLOSE (a real tie), otherwise trust the raw nearest match. Margin=18
-  // chosen from live data: known truly-ambiguous cases had a raw distance
-  // gap of ~10-12 (needed the override), known confidently-correct cases had
-  // a gap of ~23-26 (must NOT be overridden) — wide headroom on both sides.
+  // Dark-family vs Heart family discriminator for thorn cells (LESSONS
+  // L38/L39/L46/L47 — this exact pair has misread 4 times). Whole-cell
+  // raw-RGB nearest-match is UNRELIABLE here: thorn-Dark, thorn-Heart and
+  // thorn-shield-Dark all sit within ~20-45 units of each other, and adding
+  // the shield-Dark+thorn signature (L47) put a Dark-family point only ~20
+  // units from live confirmed Heart* cells. The feature that separates the
+  // FAMILIES cleanly across every live data point ever recorded is r-b
+  // (purple runes have blue>red, pink runes red>blue): Dark family -9..-2
+  // (incl. shield variants), Heart family +15.7..+27 — an ~18-unit gap.
+  // (The previous g-b signal had overlapping ranges and failed once, L46.)
+  // Per L39, only invoked when the cross-family raw race is CLOSE; gate=30
+  // chosen from live data: races needing the override measured gap 10-27,
+  // confident same-family matches measured 36+. Both family distances are
+  // MIN over all active signatures of that family so shield variants
+  // participate, and the winning family's nearest signature supplies the
+  // flags (shield in particular).
   if ((best.type === 4 || best.type === 5) && best.thorn) {
-    const darkSig = SIGNATURES.find(s => s.type === 4 && s.thorn && !s.disabled);
-    const heartSig = SIGNATURES.find(s => s.type === 5 && s.thorn && !s.disabled);
-    const dDark = Math.hypot(stats.rgb[0] - darkSig.rgb[0], stats.rgb[1] - darkSig.rgb[1], stats.rgb[2] - darkSig.rgb[2]);
-    const dHeart = Math.hypot(stats.rgb[0] - heartSig.rgb[0], stats.rgb[1] - heartSig.rgb[1], stats.rgb[2] - heartSig.rgb[2]);
-    if (Math.abs(dDark - dHeart) < 18) {
-      type = (stats.rgb[1] - stats.rgb[2]) < -25 ? 4 : 5;
+    let dDark = Infinity, dHeart = Infinity, darkSig = null, heartSig = null;
+    for (const s of SIGNATURES) {
+      if (s.disabled || !s.thorn || (s.type !== 4 && s.type !== 5)) continue;
+      const d = Math.hypot(stats.rgb[0] - s.rgb[0], stats.rgb[1] - s.rgb[1], stats.rgb[2] - s.rgb[2]);
+      if (s.type === 4 && d < dDark) { dDark = d; darkSig = s; }
+      if (s.type === 5 && d < dHeart) { dHeart = d; heartSig = s; }
+    }
+    if (Math.abs(dDark - dHeart) < 30) {
+      const rb = stats.rgb[0] - stats.rgb[2];
+      best = rb < 7 ? darkSig : heartSig;
+      type = best.type;
+      bestDist = rb < 7 ? dDark : dHeart;
     }
   }
   return { type, thorn, electric: best.electric ?? false, iced: best.iced ?? false, frozen: best.frozen ?? false, shield: best.shield ?? false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
@@ -733,25 +878,46 @@ function electricBase(imgs, cx, cy) {
   if (chroma < 20) return -1; // too washed to call
   if (b < 1) {                 // blue is floor -> warm (Wood/Light/Fire)
     if (g > r) return 2;                 // Wood
-    return g / r > 0.30 ? 3 : 1;         // Light (yellow) vs Fire (red)
+    // Light/Fire cutoff LOWERED 0.30->0.12 (live 2026-07-10, LESSONS L44,
+    // same pattern as the L42 Dark/Heart fix): a User-confirmed live Light
+    // shock at (1,3) was resampled 9 times across independent 18-frame
+    // captures — g/r = 0.176, 0.438, 0.509, 0.445, 0.419, 0.243, 0.292,
+    // 0.416, 0.441 — genuinely noisy, with the observed floor (0.176) itself
+    // already below the old 0.30 cutoff (3 of 9 samples misclassified as
+    // Fire). 0.12 clears the observed Light floor with margin; the original
+    // Fire reference (residual g/r near 0, L16) is UNVERIFIED this session —
+    // no live Fire shock was available to resample, so this margin is a
+    // one-sided estimate, same caveat as P34's Dark reference.
+    return g / r > 0.12 ? 3 : 1;         // Light (yellow) vs Fire (red)
   }
   if (g < 1) {                 // green floor -> Dark / Heart / Fire-shock
     // A Fire SHOCK's arc lifts blue over green (green becomes floor) but the
     // residual stays nearly pure red: b/r ~0.04-0.18. Heart sits ~0.47, Dark
-    // ~1.2 (original L16 calibration). Cutoff RAISED 0.75->0.95 (live
-    // 2026-07-10, LESSONS L40): a User-confirmed live Heart shock measured
-    // b/r=0.791 and 0.869 across two independent 18-frame captures — both
-    // past the old 0.75 Dark cutoff, misread as Dark both times (consistent,
-    // not flaky). 0.95 keeps clear margin above both live Heart samples while
-    // staying below the original Dark reference (1.2, UNVERIFIED this
-    // session — no live Dark shock was available to re-confirm; re-check if
-    // a Dark shock is ever misread as Heart).
+    // ~1.2 (original L16 calibration). Cutoff RAISED 0.75->1.05 in two steps
+    // (live 2026-07-10, LESSONS L40): a User-confirmed live Heart shock at
+    // (3,4) was resampled 6 times across independent 18-frame captures and
+    // measured b/r = 0.791, 0.869, 0.980, 0.867, 0.895, 0.976 — a genuinely
+    // NOISY signal (not a single miscalibrated constant), with 2 of 6 samples
+    // already past a first-attempt cutoff of 0.95. 1.05 clears the observed
+    // Heart max (0.980) by margin while staying below the original Dark
+    // reference (1.2, UNVERIFIED this session — no live Dark shock was
+    // available to resample; if a real Dark shock is ever misread as Heart,
+    // that reference itself likely needs re-measuring this session, same
+    // pattern as the thorn-color drift seen elsewhere today, L37-L39).
     const br = b / (r || 1);
-    if (br > 0.95) return 4;              // Dark (blue comparable to/above red)
+    if (br > 1.05) return 4;              // Dark (blue comparable to/above red)
     if (br > 0.30) return 5;             // Heart (pink)
     return 1;                            // Fire (red, blue only mildly lifted)
   }
-  return 0;                              // red floor -> Water (cyan/blue)
+  // Red floor: assumed Water-only until live 2026-07-10 (LESSONS L43) — a
+  // User-confirmed Wood shock at (2,3) also landed here (residual r=0,
+  // g=88.4, b=25.7), not the "blue-floor" case the Wood branch above assumed
+  // was the only route to Wood. Water's own red-floor residual (measured
+  // earlier this session, (3,1): g=39.7, b=114.3) is blue-dominant — the
+  // opposite relationship — so g vs b cleanly discriminates within this
+  // floor too, mirroring the g-vs-r check already used in the blue-floor
+  // branch above.
+  return g > b ? 2 : 0;                  // red floor -> Wood (green-dominant) or Water (blue-dominant)
 }
 
 // The no-solvable prohibition-ring overlay locks a single element for the
@@ -846,10 +1012,27 @@ function classifyBoardCell(img, gx, gy, noSolvableType, skipGlow = false, hurric
       c.type = edgeBase.type; c.dist = edgeBase.dist; c.rgb = edgeBase.rgb;
     }
   }
+  // Curse badge (2026-07-10, User-stated): a SMALL corner icon, unlike the
+  // fire overlay it does NOT obscure the base rune at all — no reclassify
+  // needed, just the flag. Independent of every check above (can coexist
+  // with thorn/edgeNoClear/noSolvable; not yet observed live combined with
+  // frozen/shield/electric, so no interaction guard beyond the flag itself).
+  if (hasCurseOverlay(img, cx, cy)) c.curse = true;
   return c;
 }
 
-function readBoardFromScreen() {
+// quick=true skips the 18-frame electric-burst confirmation below (LESSONS
+// L53): a full read normally costs one capture, but any electric-glow
+// candidate anywhere on the board balloons that to 18 captures (needed for
+// accurate electric-type classification). That precision is wasted on a
+// "did the board obviously change" staleness check — it only needs to
+// notice a GROSS change (wave transition, dialog, defeat screen), and a
+// slightly-off electric read there just means a conservative false-positive
+// re-solve (safe), not a wrong spin. quick=true trades that precision for
+// staying at ~1 capture regardless of board content, so the CONFIRM prompt
+// (2026-07-10, User-reported "sometimes it takes quite a while to start
+// dragging") is instant instead of blocking on the full burst.
+function readBoardFromScreen(quick = false) {
   const img = captureRaw();
   const noSolvableType = noSolvableTypeOverride();
   const hurricaneColumns = detectHurricaneColumns(img);
@@ -864,7 +1047,7 @@ function readBoardFromScreen() {
     }
     cells.push(row);
   }
-  if (anyCandidate) {
+  if (anyCandidate && !quick) {
     // Electric anywhere -> capture a burst. Persistence across frames rejects
     // one-frame neighbor-flare ghosts (P11); the burst also feeds electricBase
     // the temporal minimum it needs to read the base under glare (L16). ~10
@@ -1130,6 +1313,54 @@ async function executeTouchPath(screenPath, stepMs) {
     q.once('exit', () => { clearTimeout(timer); resolve(); });
   });
   return dragMs;
+}
+
+/**
+ * --rearrange (P50): dispatch SEVERAL SEPARATE drags in one MaaTouch
+ * session, reusing dispatchTouchPath per drag. Spawning MaaTouch has a
+ * ~1.5s boot cost (executeTouchPath's `await sleep(1500)`) — calling
+ * executeTouchPath once per drag would pay that on EVERY drag (a 20-drag
+ * rearrangement would burn 30+s in boot overhead alone, working against
+ * the whole point of a stage-timer-limited mechanic). Boot ONCE, dispatch
+ * every drag's down+move+release to the SAME open stdin, clean up ONCE at
+ * the end — same shape as executeTouchPath, just looped.
+ *
+ * No settle-wait/re-capture between drags (User-confirmed model: no
+ * gravity or dissolve happens until the stage timer expires, so there is
+ * nothing to observe between drags — only the FINAL board matters).
+ * UNVERIFIED (device offline this session): the 150ms pause between a
+ * drag's release and the next drag's touch-down is a conservative guess at
+ * "enough for the game to recognize a NEW gesture, not a continuation of
+ * the last one" — has not been confirmed live; tune if drags bleed into
+ * each other or feel unnecessarily slow.
+ */
+async function executeMultiDragPath(screenPaths, stepMs) {
+  try { execSync('adb shell su -c "pkill -f MaaTouch"', { stdio: 'pipe' }); } catch { /* none running */ }
+  const p = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  await sleep(1500); // MaaTouch boot — ONCE for the whole batch
+  const w = s => p.stdin.write(s + '\n');
+  let totalMs = 0;
+  for (const screenPath of screenPaths) {
+    const t0 = await dispatchTouchPath(w, screenPath, stepMs);
+    w('u 0'); w('c');
+    totalMs += performance.now() - t0;
+    await sleep(150); // UNVERIFIED — see doc comment above
+  }
+  await sleep(2000); // grace: only the tail can be in flight
+  p.kill();
+
+  // Same unconditional forced-release cleanup as executeTouchPath, run once
+  // for the whole batch (a stuck touch after the LAST drag is the only risk
+  // once every prior drag already sent its own 'u 0').
+  const localScript = path.join(__dirname, 'spin_script.txt');
+  fs.writeFileSync(localScript, 'u 0\nc\n');
+  execSync(`adb push "${localScript}" /data/local/tmp/tos_spin.txt`, { stdio: 'pipe' });
+  await new Promise(resolve => {
+    const q = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App < /data/local/tmp/tos_spin.txt'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    const timer = setTimeout(() => { q.kill(); resolve(); }, 8000);
+    q.once('exit', () => { clearTimeout(timer); resolve(); });
+  });
+  return totalMs;
 }
 
 // ---------- --after-spin-kill: hold-and-revert ----------
@@ -1435,6 +1666,16 @@ async function main() {
     // final answer, in ALL cascade waves, not just the first.
     const hazardPositions = edgeNoClearCells.map(s => { const [x, y] = s.split(',').map(Number); return { x, y }; });
     if (edgeNoClearCells.length) console.log('[TOS] EDGE_NO_CLEAR_CELLS=' + edgeNoClearCells.join(' ') + ' (must never dissolve, any wave — enforced via solver hazardPositions)');
+    // Curse cells (P37, corrected P38 — User live-corrected: the curse
+    // effect travels WITH the dragged rune, NOT a fixed board position, so
+    // it is NOT part of hazardPositions — encoded via CURSE_BASE in
+    // board.fromArray below instead, same in-band-value family as shield.
+    // This list is recognition-time only (where the badge was SEEN before
+    // the drag) — used for the CURSE_CELLS diagnostic and the drag-execution
+    // dwell heuristic, not for the solver's hazard mechanism.
+    const curseCells = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.curse) curseCells.push(`${gx},${gy}`); }));
+    if (curseCells.length) console.log('[TOS] CURSE_CELLS=' + curseCells.join(' ') + ' (must never dissolve, any wave — travels WITH the rune, enforced via solver CURSE_BASE board value, not position; User unsure if locked to one element in future battles)');
     const shieldCellsList = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.shield) shieldCellsList.push(`${gx},${gy}`); }));
     if (shieldCellsList.length) console.log('[TOS] SHIELD_CELLS=' + shieldCellsList.join(' ') + ' (dissolves normally, travels with the rune; solver enforces >=1 shielded rune of each color must survive every wave — not a full freeze, P30)');
@@ -1454,7 +1695,7 @@ async function main() {
     // (there: touching is forbidden; here: an off-plan swap risks an
     // accidental match).
     const hazardDwellCells = [];
-    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.edgeNoClear || c.noSolvable || c.hurricane) hazardDwellCells.push({ x: gx, y: gy }); }));
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.edgeNoClear || c.curse || c.noSolvable || c.hurricane) hazardDwellCells.push({ x: gx, y: gy }); }));
     const detectedNoSolvableTypes = [...new Set(cells.flat().filter(c => c.noSolvable).map(c => c.type))];
     let noSolvableTypes = [...new Set([...parseRuneTypeList('--no-solvable'), ...detectedNoSolvableTypes])];
     if (detectedNoSolvableTypes.length > 0) {
@@ -1503,8 +1744,16 @@ async function main() {
     // count reaching zero. `cells[y][x].type`/label still show the real
     // element (Wood+) for display; only the SOLVER board substitutes the
     // shielded value.
+    // Cursed runes (P37, corrected P38 — User live-corrected: "the curse
+    // badge will follow the rune unlike fire-hazard mechanic") are the same
+    // in-band-value family, own range CURSE_BASE + type (14th-19th board
+    // value) so they're distinguishable from shielded runes. Matches and
+    // dissolves completely normally; BoardSimulator.resolve()'s
+    // curseViolated flags the ONLY forbidden outcome: THIS specific rune
+    // actually dissolving, in any wave — unlike shield's per-color count
+    // floor, curse is a hard per-instance "never".
     board.fromArray(cells.map(row => row.map(c =>
-      (c.frozen || c.hurricane) ? FROZEN : (c.shield ? SHIELD_BASE + c.type : c.type))));
+      (c.frozen || c.hurricane) ? FROZEN : (c.curse ? CURSE_BASE + c.type : (c.shield ? SHIELD_BASE + c.type : c.type)))));
 
     // --drag-from N (1-indexed card, 1-6): the drag PHYSICALLY starts by
     // touching card N and dragging it into the board — that action drops a
@@ -1645,6 +1894,99 @@ async function main() {
     const maxMode = rawTarget === 'max';
     const exactMode = rawExactFlag !== null && !maxMode && !String(rawExactFlag).endsWith('+');
     const minFirstArg = maxMode ? 0 : Number(String(rawTarget ?? 0).replace(/\+$/, ''));
+    // --first-attr-combos N = EXACTLY N first-wave ATTRIBUTE combos (首消N屬:
+    // wave-1 combo groups of any NON-Heart type; repeats of one attribute
+    // count, e.g. 3 Light groups = 3); N+ = at least N. Heart groups are not
+    // counted but not forbidden. "max" is not supported for this flag.
+    const rawAttr = argValue('--first-attr-combos');
+    if (rawAttr === 'max') {
+      console.log('[TOS] ABORT=first-attr-combos max mode is not supported (use an explicit N or N+) (no touch sent)');
+      return;
+    }
+    const exactAttrMode = rawAttr !== null && !String(rawAttr).endsWith('+');
+    const minFirstAttr = Number(String(rawAttr ?? 0).replace(/\+$/, ''));
+    // --convert TYPE:N — card skill: the first N runes the finger TOUCHES
+    // while dragging (not counting the picked-up rune, which never converts
+    // and always keeps its own type wherever the drag ends) turn into TYPE
+    // as they're touched. TYPE accepts full names/letters/digits, same as
+    // every other rune-type flag; N is a count or "max"/"all" for the whole
+    // path. --convert wood:5 / --convert w:5 / --convert water:max
+    const rawConvert = argValue('--convert');
+    let convertType = null, convertCount = 0;
+    if (rawConvert !== null) {
+      const parts = String(rawConvert).split(':');
+      if (parts.length !== 2) throw new Error('--convert must be "TYPE:N" or "TYPE:max" (e.g. --convert wood:5)');
+      const [typeTok, countTok] = parts.map(s => s.trim().toLowerCase());
+      convertType = /^[0-5]$/.test(typeTok) ? Number(typeTok)
+        : TYPE_LETTERS.indexOf(typeTok) !== -1 ? TYPE_LETTERS.indexOf(typeTok)
+        : TYPE_NAMES.map(n => n.toLowerCase()).indexOf(typeTok);
+      if (convertType === -1) throw new Error(`--convert: unknown rune type "${typeTok}" (use ${TYPE_NAMES.join('/')}, ${TYPE_LETTERS.join('/')}, or 0-5)`);
+      convertCount = (countTok === 'max' || countTok === 'all') ? Infinity : Number(countTok);
+      if (!(convertCount === Infinity || (Number.isInteger(convertCount) && convertCount > 0))) {
+        throw new Error(`--convert: count must be a positive integer or "max"/"all" (got "${countTok}")`);
+      }
+      // Rearrange mode logs its own CONVERT_TARGET line below (different
+      // semantics: applies to the first drag only, not "the whole path").
+      if (!process.argv.includes('--rearrange')) {
+        console.log(`[TOS] CONVERT_TARGET=${TYPE_NAMES[convertType]} count=${convertCount === Infinity ? 'max' : convertCount} (first N runes touched while dragging, excluding the picked-up rune)`);
+      }
+    }
+    // --want-group TYPE:N — BEST-EFFORT (not mandatory, never aborts): a
+    // match group of EXACTLY N cells of TYPE somewhere across EVERY cascade
+    // wave (not wave-1-only like --first-combos). TYPE accepts full name/
+    // letter/digit, same parser convention as every other rune-type flag.
+    const rawWantGroup = argValue('--want-group');
+    let wantGroupType = null, wantGroupSize = 0;
+    if (rawWantGroup !== null) {
+      const parts = String(rawWantGroup).split(':');
+      if (parts.length !== 2) throw new Error('--want-group must be "TYPE:N" (e.g. --want-group water:5)');
+      const [typeTok, sizeTok] = parts.map(s => s.trim().toLowerCase());
+      wantGroupType = /^[0-5]$/.test(typeTok) ? Number(typeTok)
+        : TYPE_LETTERS.indexOf(typeTok) !== -1 ? TYPE_LETTERS.indexOf(typeTok)
+        : TYPE_NAMES.map(n => n.toLowerCase()).indexOf(typeTok);
+      if (wantGroupType === -1) throw new Error(`--want-group: unknown rune type "${typeTok}" (use ${TYPE_NAMES.join('/')}, ${TYPE_LETTERS.join('/')}, or 0-5)`);
+      wantGroupSize = Number(sizeTok);
+      if (!(Number.isInteger(wantGroupSize) && wantGroupSize > 0)) {
+        throw new Error(`--want-group: size must be a positive integer (got "${sizeTok}")`);
+      }
+      console.log(`[TOS] WANT_GROUP_TARGET=${TYPE_NAMES[wantGroupType]}:${wantGroupSize} (best-effort — any cascade wave, exact size; won't abort if unreachable)`);
+    }
+    // --rearrange (排珠, P50, User-requested): multiple SEPARATE drags,
+    // no dissolve until the stage timer expires, unlimited drag budget, no
+    // gravity between releases. Solving becomes "find the best PERMUTATION
+    // of the existing runes" (RearrangeSolver), not "find the best drag
+    // path" — so single-drag-path concepts (--start/--end pins, --fire-route,
+    // --convert's touch-order semantics, --drag-from's single continuous
+    // motion) have no meaning here and are explicitly rejected rather than
+    // silently ignored.
+    const rearrangeMode = process.argv.includes('--rearrange');
+    let rearrangeBeamWidth = 0, rearrangeMaxSteps = 0;
+    if (rearrangeMode) {
+      const incompatible = [];
+      if (startCell) incompatible.push('--start');
+      if (endCells) incompatible.push('--end');
+      if (fireRoute > 0) incompatible.push('--fire-route');
+      if (dragFromCol !== null) incompatible.push('--drag-from');
+      if (incompatible.length > 0) {
+        console.log(`[TOS] ABORT=rearrange-conflict ${incompatible.join(',')} has no meaning in --rearrange mode (multiple separate drags, no single path/start/end) (no touch sent)`);
+        return;
+      }
+      // --convert composes with --rearrange (2026-07-10, User-requested +
+      // User-confirmed design): ONLY the FIRST physical drag actually
+      // generated converts its touched cells — a multi-drag rearrangement
+      // has no single "whole path" for the flag to apply to, and applying
+      // it to every drag would mean nothing left to rearrange elsewhere.
+      // convertCount may be Infinite (--convert TYPE:max), same as
+      // single-drag mode. See decomposeRearrangement's doc comment for why
+      // this is safe as a pure execution-time bonus (never fed back into
+      // RearrangeSolver's search).
+      if (convertType !== null) {
+        console.log(`[TOS] CONVERT_TARGET=${TYPE_NAMES[convertType]} count=${convertCount === Infinity ? 'max' : convertCount} (applies to the FIRST drag only, in --rearrange mode)`);
+      }
+      rearrangeBeamWidth = Number(argValue('--rearrange-beam') ?? 60);
+      rearrangeMaxSteps = Number(argValue('--rearrange-steps') ?? 40);
+      console.log(`[TOS] REARRANGE_MODE=on (beam=${rearrangeBeamWidth} steps=${rearrangeMaxSteps} per component — multiple separate drags, no dissolve until stage timer expires)`);
+    }
     // --first-runes N = EXACTLY N runes in the first wave (楊玉環 "NUM N");
     // --first-runes N+ = at least N.
     const rawRunes = argValue('--first-runes');
@@ -1733,13 +2075,33 @@ async function main() {
     }
     let reserveTypes = [];
     if (firstWaveHaveTypes.length > 0) {
-      const haveTotals = firstWaveHaveTypes.map(t => ({t, n: cells.flat().filter(c => c.type === t && !c.frozen && !c.hurricane).length}));
+      // Per-type feasibility vs BOTH structural conflicts a "clear >=1 of
+      // this type" demand can hit: (a) too few dissolvable runes to form a
+      // min-run group at all (cursed runes can NEVER dissolve, so they don't
+      // count as usable); (b) the shield floor (P30): the group must leave
+      // >=1 shielded rune of the type, so it may use at most shieldCount-1
+      // shielded runes — feasible only if plain >= minRun - (shieldCount-1).
+      // On a board where ALL runes of a demanded type are shielded (live
+      // 2026-07-10), (b) is what fires: the demand is unsatisfiable at any
+      // beam width, and without this gate the solver grinds through beam +
+      // planner escalation before aborting.
+      const haveTotals = firstWaveHaveTypes.map(t => {
+        const usableCells = cells.flat().filter(c => c.type === t && !c.frozen && !c.hurricane && !c.curse);
+        const shieldN = usableCells.filter(c => c.shield).length;
+        return {t, n: usableCells.length, shieldN, plainN: usableCells.length - shieldN};
+      });
       console.log('[TOS] FIRST_WAVE_HAVE_TARGET=' + haveTotals.map(o => `${TYPE_NAMES[o.t]}:${o.n}`).join(','));
-      const haveDead = haveTotals.filter(o => o.n < (isTwoMatch(o.t) ? 2 : 3));
+      const haveDead = haveTotals.map(o => {
+        const minRun = isTwoMatch(o.t) ? 2 : 3;
+        if (o.n < minRun) return {...o, why: `${o.n} dissolvable (need ${minRun})`};
+        if (o.shieldN > 0 && o.shieldN - Math.max(0, minRun - o.plainN) < 1)
+          return {...o, why: `shield-conflict (${o.shieldN} shielded, ${o.plainN} plain — any ${minRun}-group drains the shield floor)`};
+        return null;
+      }).filter(Boolean);
       if (haveDead.length > 0) {
-        const haveDeadDesc = haveDead.map(o => `${TYPE_NAMES[o.t]}=${o.n}`).join(',');
+        const haveDeadDesc = haveDead.map(o => `${TYPE_NAMES[o.t]}=${o.why}`).join(',');
         console.log('[TOS] FIRST_WAVE_HAVE_INFEASIBLE=' + haveDeadDesc
-          + ' — too few of a type to ever form a dissolve group this round (2-match types need 2, others 3)');
+          + ' — this type cannot dissolve a group this round without violating a harder constraint');
         const force = process.argv.includes('--force-partial-first-wave-have');
         const proceed = force || await askYesNo(
           `[TOS] Continue and solve for the remaining type(s) only (drop ${haveDeadDesc}, preserve the rest for a future round)? [y/N] `);
@@ -1762,22 +2124,89 @@ async function main() {
           + ' reserved above their own min-run so a future round can still pair them)');
       }
     }
+    // Pre-solve feasibility for --first-attr-combos (same principle as the
+    // FIRST_WAVE_HAVE gate, P41/L48: model EVERY hard constraint, not just a
+    // count floor): per attribute type, dissolvable runes exclude frozen/
+    // hurricane/cursed, the shield floor keeps 1 shielded rune per color
+    // undissolvable in net terms, and types banned from wave 1 contribute 0.
+    if (minFirstAttr > 0) {
+      let maxAttr = 0;
+      for (const t of [0, 1, 2, 3, 4]) {
+        if (noSolvableTypes.includes(t) || firstWaveNoTypes.includes(t)) continue;
+        const usableCells = cells.flat().filter(c => c.type === t && !c.frozen && !c.hurricane && !c.curse);
+        const shieldN = usableCells.filter(c => c.shield).length;
+        const dissolvable = usableCells.length - (shieldN > 0 ? 1 : 0);
+        maxAttr += Math.floor(Math.max(0, dissolvable) / (isTwoMatch(t) ? 2 : 3));
+      }
+      console.log(`[TOS] FIRST_ATTR_COMBOS_TARGET=${exactAttrMode ? '' : '>='}${minFirstAttr} (attribute=non-Heart groups; max constructible on this board=${maxAttr})`);
+      if (maxAttr < minFirstAttr) {
+        console.log(`[TOS] ABORT=first-attr-combos-infeasible only ${maxAttr} attribute combo(s) constructible this round (no touch sent)`);
+        return;
+      }
+    }
     // --workers N: shard the beam search across worker_threads (phone/
     // parallel.js). Default = cores-1; 1 = exact sequential solve. The beam
     // is PARTITIONED per worker (beamWidth/N each), so results can differ
     // slightly from --workers 1 in either direction — wall time ~1/N.
+    // RearrangeSolver is sequential-only for v1 (P50) — --workers is
+    // accepted but has no effect in --rearrange mode.
     const workers = Math.max(1, Number(argValue('--workers') ?? 0) || defaultWorkers());
-    console.log(`[TOS] WORKERS=${workers}` + (workers > 1 ? ` (beam sharded ~${Math.ceil(Number(argValue('--beam') ?? 200) / workers)}/worker; --workers 1 for exact sequential)` : ''));
+    if (!rearrangeMode) {
+      console.log(`[TOS] WORKERS=${workers}` + (workers > 1 ? ` (beam sharded ~${Math.ceil(Number(argValue('--beam') ?? 200) / workers)}/worker; --workers 1 for exact sequential)` : ''));
+    }
     const t0 = Date.now();
-    let sol, engine;
+    let sol, engine, rearrangeDrags = null;
 
-    if (minFirstRunes > 0) {
+    if (rearrangeMode) {
+      // No path/moves/startX/startY (there is no single drag) — sol carries
+      // only the fields the SHARED post-solve gates below actually read
+      // (board/score/comboCount/firstCombos/firstAttrCombos/firstRunes/
+      // firstClearedByType/chains), plus a synthetic moves/path pair sized
+      // to whether ANY drag was planned, so the existing empty-solution
+      // guard (`sol.moves.length === 0`) and start/end-pin check (skipped
+      // entirely here since rearrangeMode already rejected --start/--end at
+      // parse time) keep working completely unmodified.
+      const rs = new RearrangeSolver(board, {
+        sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
+        minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
+        minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
+        minFirstRunes, exactFirstRunes: exactRunesMode,
+        wantGroupType, wantGroupSize,
+        twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+        rearrangeBeamWidth, rearrangeMaxSteps,
+      });
+      const result = rs.solve();
+      // decomposeRearrangement's returned `board` is the ACTUAL final
+      // arrangement — identical to result.board when convertType is null,
+      // but genuinely DIFFERENT once conversion is active (the first
+      // drag's left-behind cells really did change type). Every field
+      // below is recomputed from THAT board (via RearrangeSolver's own
+      // scoreBoard(), the same weight/combo/first-combos formulas used
+      // everywhere else), not from RearrangeSolver's aspirational target —
+      // otherwise CLEAR_ALL/WANT_GROUP_RESULT/BOARD_AFTER downstream would
+      // silently check an arrangement that no longer exists post-execution.
+      const decomposed = decomposeRearrangement(board, result.board, result.movableCells, convertType, convertCount);
+      rearrangeDrags = decomposed.drags;
+      const finalSc = rs.scoreBoard(decomposed.board);
+      sol = {
+        board: decomposed.board, score: finalSc.weight, comboCount: finalSc.comboCount,
+        firstCombos: finalSc.firstCombos, firstAttrCombos: finalSc.firstAttrCombos,
+        firstRunes: finalSc.firstRunes, firstClearedByType: finalSc.firstClearedByType,
+        chains: finalSc.chains,
+        moves: rearrangeDrags.length > 0 ? ['rearranged'] : [],
+        path: [{x: rearrangeDrags[0]?.startX ?? 0, y: rearrangeDrags[0]?.startY ?? 0}],
+        startX: rearrangeDrags[0]?.startX ?? 0, startY: rearrangeDrags[0]?.startY ?? 0,
+      };
+      engine = `RearrangeSolver(drags=${rearrangeDrags.length},movable=${result.movableCells.length})`;
+    } else if (minFirstRunes > 0) {
       sol = await solveDoraParallel(board, {
         beamWidth: Number(argValue('--beam') ?? 200),
         maxPath: Number(argValue('--max-path') ?? 30),
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstRunes, exactFirstRunes: exactRunesMode,
+        minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
+        convertType, convertCount, wantGroupType, wantGroupSize,
         startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
@@ -1794,6 +2223,8 @@ async function main() {
         maxPath: Number(argValue('--max-path') ?? 30),
         plannerBeamWidth: Math.max(300, Number(argValue('--beam') ?? 0)),
         plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
+        minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
+        convertType, convertCount, wantGroupType, wantGroupSize,
         startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       sol = res.solution;
@@ -1805,22 +2236,27 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
+        minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
+        convertType, convertCount, wantGroupType, wantGroupSize,
         startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       engine = 'DoraSolver';
     }
 
     const missesTarget = () => exactMode ? sol.firstCombos !== minFirstArg : sol.firstCombos < minFirstArg;
+    const attrMissesTarget = () => minFirstAttr > 0
+      && (exactAttrMode ? sol.firstAttrCombos !== minFirstAttr : sol.firstAttrCombos < minFirstAttr);
     // DoraSolver's beam often can't gather a scattered scarce type into its
     // dissolving group(s), so clear-all MISSes; detect it to trigger the
     // constructive coverage planner (which CAN, unlike a wider beam).
     const clearAllMissed = () => {
       if (clearTypes.length === 0) return false;
       const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
-      // Count shielded cells of type t too (v === SHIELD_BASE + t) — they're
-      // owed the same as a plain rune of that color (P30: shields dissolve
-      // normally, only "all shielded" per color is forbidden).
-      const totalsByType = t => board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t).length, 0);
+      // Count shielded/cursed cells of type t too (P30/P37: both dissolve
+      // normally — shield forbids the per-color count reaching zero, curse
+      // forbids the specific rune ever dissolving, but either way they're
+      // still "owed" runes of that color for clear-all counting purposes).
+      const totalsByType = t => board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t || v === CURSE_BASE + t).length, 0);
       return clearTypes.some(t => sim.firstClearedByType[t] < totalsByType(t));
     };
     const firstWaveNoMissed = () => {
@@ -1836,7 +2272,12 @@ async function main() {
 
     // Guarantee escalation: if beam search misses the first-combo target OR a
     // clear-all demand, the planner constructs it (or proves it impossible).
-    if (!maxMode && minFirstRunes === 0 && ((minFirstArg > 0 && missesTarget()) || clearAllMissed() || firstWaveNoMissed() || firstWaveHaveMissed())) {
+    // Not applicable to --rearrange (P50): RearrangeSolver already searches
+    // permutations directly, and TargetPlanner's drag-PATH routing doesn't
+    // apply to a multi-drag rearrangement — RearrangeSolver's own best-effort
+    // result stands as-is (same "no dedicated planner yet" scope decision
+    // documented on wantGroupType).
+    if (!rearrangeMode && !maxMode && minFirstRunes === 0 && ((minFirstArg > 0 && missesTarget()) || attrMissesTarget() || clearAllMissed() || firstWaveNoMissed() || firstWaveHaveMissed())) {
       // plannerBeam is a CEILING: solveClearAllParallel escalates internally
       // (300 -> 2000 -> 8000 -> ... up to this value), so it stays fast on
       // easy/no-pin cases (L22: routes at 300) while still succeeding on a
@@ -1847,7 +2288,12 @@ async function main() {
       const plannerMaxPath = Math.max(60, Number(argValue('--max-path') ?? 0));
       const plannerOpts = {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
-        minFirstCombos: minFirstArg, exact: exactMode,
+        // Attr-only requests reuse the combo-count construction with Heart
+        // excluded from color assignment (TargetPlanner.attrTarget), so the
+        // planner needs a combo target of at least the attr demand.
+        minFirstCombos: minFirstArg || minFirstAttr, exact: exactMode,
+        minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
+        convertType, convertCount, wantGroupType, wantGroupSize,
         beamWidth: plannerBeam, maxPath: plannerMaxPath,
         startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       };
@@ -1872,27 +2318,43 @@ async function main() {
       }
     }
 
-    console.log(`[TOS] SOLVE ms=${Date.now() - t0} engine=${engine} start=${sol.startX},${sol.startY} moves=${sol.moves.length} first=${sol.firstCombos} firstRunes=${sol.firstRunes} combos=${sol.comboCount} chains=${sol.chains} weight=${sol.score}`);
-    console.log('[TOS] PATH=' + sol.path.map(p => `${p.x},${p.y}`).join(' '));
+    if (rearrangeMode) {
+      console.log(`[TOS] SOLVE ms=${Date.now() - t0} engine=${engine} drags=${rearrangeDrags.length} first=${sol.firstCombos} firstAttr=${sol.firstAttrCombos} firstRunes=${sol.firstRunes} combos=${sol.comboCount} chains=${sol.chains} weight=${sol.score}`);
+      // One [TOS] line per planned drag (R3: single-line KEY=value markers)
+      // instead of a single PATH= — a rearrangement is inherently several
+      // separate drags, not one path.
+      rearrangeDrags.forEach((d, i) => {
+        console.log(`[TOS] REARRANGE_DRAG_${i + 1}=` + d.path.map(p => `${p.x},${p.y}`).join(' '));
+      });
+    } else {
+      console.log(`[TOS] SOLVE ms=${Date.now() - t0} engine=${engine} start=${sol.startX},${sol.startY} moves=${sol.moves.length} first=${sol.firstCombos} firstAttr=${sol.firstAttrCombos} firstRunes=${sol.firstRunes} combos=${sol.comboCount} chains=${sol.chains} weight=${sol.score}`);
+      console.log('[TOS] PATH=' + sol.path.map(p => `${p.x},${p.y}`).join(' '));
+    }
 
     // Post-drag board (sol.board — the raw arrangement right after the drag
     // completes, BEFORE any dissolve/gravity). Hazard/no-solvable markers are
     // POSITIONAL (stay with the cell, not the rune — P9/P22), so they're
     // read from the ORIGINAL `cells` recognition, not from sol.board itself.
-    // Lets the User visually cross-check the plan against what they observe
-    // in-game before confirming, and self-checks (via the SAME hazardPositions
-    // mechanism the solver itself is gated on, covering EVERY cascade wave,
-    // not just the first) that the plan never dissolves a hazard position —
-    // a WARNING here would mean a real algorithm bug, distinct from a
-    // drag-execution fidelity gap (see PROJECT-FACTS P22/L34).
+    // Curse (P37, corrected P38) is DIFFERENT — it travels WITH the rune, so
+    // its `&` marker below is decoded from the SOLVER board value (like
+    // shield's `+`), not from the original cell — showing where the cursed
+    // rune actually ends up POST-drag, which may differ from where the badge
+    // was originally seen. Lets the User visually cross-check the plan
+    // against what they observe in-game before confirming, and self-checks
+    // (via the SAME mechanisms the solver itself is gated on, covering
+    // EVERY cascade wave, not just the first) that the plan never dissolves
+    // a hazard position or a cursed rune — a WARNING here would mean a real
+    // algorithm bug, distinct from a drag-execution fidelity gap (see
+    // PROJECT-FACTS P22/L34).
     cells.forEach((row, gy) => {
       console.log('[TOS] BOARD_AFTER_ROW' + gy + '=' + row.map((c, gx) => {
         if (c.hurricane) return 'Hurricane';
         const v = sol.board.get(gx, gy);
-        const shielded = v >= SHIELD_BASE;
-        const baseVal = shielded ? v - SHIELD_BASE : v;
+        const cursed = v >= CURSE_BASE;
+        const shielded = !cursed && v >= SHIELD_BASE;
+        const baseVal = cursed ? v - CURSE_BASE : (shielded ? v - SHIELD_BASE : v);
         const t = v === FROZEN ? 'Frozen' : (TYPE_NAMES[baseVal] ?? '?');
-        return t + (shielded ? '+' : '') + (c.edgeNoClear ? '$' : '') + (c.noSolvable ? '%' : '');
+        return t + (shielded ? '+' : '') + (cursed ? '&' : '') + (c.edgeNoClear ? '$' : '') + (c.noSolvable ? '%' : '');
       }).join(','));
     });
     const afterSim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
@@ -1903,6 +2365,12 @@ async function main() {
     }
     if (afterSim.shieldViolated) {
       console.log('[TOS] WARNING=this plan drops a color\'s shielded-rune count to zero in some wave — this should be impossible; please report with this board+path');
+    }
+    if (afterSim.curseViolated) {
+      console.log('[TOS] WARNING=this plan dissolves a cursed rune in some wave — this should be impossible; please report with this board+path');
+    }
+    if (curseCells.length) {
+      console.log('[TOS] CURSE_RESULT=' + (afterSim.curseViolated ? 'MISS' : 'ok'));
     }
     if (shieldCellsList.length) {
       const shieldTypesPresent = afterSim.shieldTotal.map((n, t) => ({ t, n })).filter(o => o.n > 0);
@@ -1915,7 +2383,7 @@ async function main() {
       // remaining = original board count minus everything cleared across all
       // waves; reserve floor is the type's own min-run (2 for 2-match, else 3).
       const reserveDetail = reserveTypes.map(t => {
-        const orig = board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t).length, 0);
+        const orig = board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t || v === CURSE_BASE + t).length, 0);
         const remaining = orig - afterSim.totalClearedByType[t];
         return `${TYPE_NAMES[t]}:${remaining}/${isTwoMatch(t) ? 2 : 3}min`;
       });
@@ -1929,11 +2397,15 @@ async function main() {
     // leaving no valid answer at all (DoraSolver returns the degenerate
     // moves=0 solution). Abort rather than send a no-op/undefined drag.
     if (sol.moves.length === 0 && !startCell && !endCells) {
-      console.log('[TOS] ABORT=no-hazard-safe-path'
-        + (hazardPositions.length > 0 || shieldCellsList.length > 0
-          ? ` — every reachable arrangement within --max-path ${Number(argValue('--max-path') ?? 30)} violates a fire-hazard or shield constraint; try a wider --beam/--max-path`
-          : ' — no valid path found')
-        + ' (no touch sent)');
+      if (rearrangeMode) {
+        console.log('[TOS] ABORT=no-rearrangement-found — the current arrangement is already the best RearrangeSolver could reach (or nothing to move); try a wider --rearrange-beam/--rearrange-steps (no touch sent)');
+      } else {
+        console.log('[TOS] ABORT=no-hazard-safe-path'
+          + (hazardPositions.length > 0 || shieldCellsList.length > 0 || curseCells.length > 0
+            ? ` — every reachable arrangement within --max-path ${Number(argValue('--max-path') ?? 30)} violates a fire-hazard, shield, or curse constraint; try a wider --beam/--max-path`
+            : ' — no valid path found')
+          + ' (no touch sent)');
+      }
       return;
     }
 
@@ -1952,20 +2424,34 @@ async function main() {
     }
 
     // Clear-all gate: recompute from the post-drag board (engine-independent
-    // — planner solutions and max mode pass through here too). Totals are
-    // counted on sol.board (drags conserve runes, so they equal the original
-    // board's counts); "trapped" = required runes the drag LEFT in sealed /
-    // no-dissolve cells, which is why the demand failed there.
+    // — planner solutions and max mode pass through here too). "trapped" =
+    // required runes the drag LEFT in sealed/no-dissolve cells (scanned from
+    // sol.board — the final arrangement), which is why the demand failed
+    // there. The DEMAND TOTAL, however, must come from the ORIGINAL
+    // recognized board (same as clearTypeTotals/CLEAR_ALL_TARGET/
+    // clearAllMissed), NOT sol.board (L52, P48): "drags conserve runes" was
+    // true for every prior feature (positions move, types don't) but
+    // --convert breaks it — it actively changes rune TYPES mid-drag, so
+    // counting the total from sol.board would silently inflate the demand
+    // by however many extra runes the conversion created. User-confirmed
+    // (2026-07-10): the demand is fixed at what was on the board BEFORE the
+    // drag; runes your OWN --convert skill turns into the type are a bonus,
+    // not an added requirement (clearing them is fine, just not required).
     if (clearTypes.length > 0) {
       const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
       const detail = [], unmet = [];
       for (const t of clearTypes) {
-        let total = 0, trapped = 0;
+        let total = 0;
+        for (const row of board.grid) {
+          for (const v of row) {
+            if (v === t || v === SHIELD_BASE + t || v === CURSE_BASE + t) total++; // shielded/cursed runes of type t are owed too (P30/P37)
+          }
+        }
+        let trapped = 0;
         for (let y = 0; y < 5; y++) {
           for (let x = 0; x < 6; x++) {
             const v = sol.board.get(x, y);
-            if (v !== t && v !== SHIELD_BASE + t) continue; // shielded runes of type t are owed too (P30)
-            total++;
+            if (v !== t && v !== SHIELD_BASE + t && v !== CURSE_BASE + t) continue;
             if (sealedCols.includes(x) || (hasFlags && (flagGrid[y][x] & CELL_FLAGS.NO_DISSOLVE) !== 0)) trapped++;
           }
         }
@@ -2032,16 +2518,44 @@ async function main() {
       console.log(`[TOS] ABORT=first-combos first=${sol.firstCombos} required=${exactMode ? 'exactly ' : '>='}${minFirstArg} (no touch sent)`);
       return;
     }
+    if (minFirstAttr > 0) {
+      console.log(`[TOS] FIRST_ATTR_COMBOS_RESULT=${sol.firstAttrCombos}/${exactAttrMode ? '' : '>='}${minFirstAttr}` + (attrMissesTarget() ? ' MISS' : ' ok'));
+      if (attrMissesTarget()) {
+        console.log(`[TOS] ABORT=first-attr-combos firstAttr=${sol.firstAttrCombos} required=${exactAttrMode ? 'exactly ' : '>='}${minFirstAttr} (no touch sent; try a wider --beam and/or --max-path)`);
+        return;
+      }
+    }
+    if (wantGroupType !== null) {
+      // Best-effort — checked across EVERY cascade wave (not just wave 1),
+      // never aborts (User-requested: "best-effort, spin anyway").
+      const wgSim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
+      const wgMet = wgSim.groups.some(g => g.type === wantGroupType && g.cells.length === wantGroupSize);
+      console.log(`[TOS] WANT_GROUP_RESULT=${TYPE_NAMES[wantGroupType]}:${wantGroupSize}` + (wgMet ? ' ok' : ' MISS (best-effort, spinning anyway — try a wider --beam and/or --max-path)'));
+    }
 
     if (dry) { console.log('[TOS] DRY_RUN=1 (no touch sent)'); return; }
     if (process.argv.includes('--confirm')) {
-      await askEnter('[TOS] CONFIRM board+path above, press Enter to spin (Ctrl+C aborts)... ');
+      await askEnter(rearrangeMode
+        ? `[TOS] CONFIRM ${rearrangeDrags.length} drag(s) above, press Enter to spin (Ctrl+C aborts)... `
+        : '[TOS] CONFIRM board+path above, press Enter to spin (Ctrl+C aborts)... ');
       // Staleness guard: the game may have moved on (attack animations, wave
       // transition) while waiting at the prompt — spinning a stale plan drags
       // on a board that no longer exists. Re-capture and re-solve on mismatch.
       if (!boardFile) {
-        const fresh = readBoardFromScreen();
-        const same = fresh.every((row, gy) => row.every((c, gx) => cellLabel(c) === cellLabel(cells[gy][gx])));
+        // quick=true (L53): skip the 18-frame electric-burst confirmation —
+        // this check only needs to notice a GROSS change, not classify
+        // electric cells precisely. Because of that, an electric cell on
+        // either side is compared by electric-ness only (not exact type):
+        // the quick single-frame read can't reliably confirm a shock's base
+        // element (that needs the burst this mode deliberately skips), so
+        // comparing exact labels there would false-positive BOARD_CHANGED
+        // on every confirm whenever an electric rune is present.
+        const fresh = readBoardFromScreen(true);
+        const same = fresh.every((row, gy) => row.every((c, gx) => {
+          const orig = cells[gy][gx];
+          if (c.electric || orig.electric) return c.electric === orig.electric;
+          return cellLabel(c) === cellLabel(orig);
+        }));
         if (!same) {
           console.log('[TOS] BOARD_CHANGED=true (board moved while waiting at confirm) — re-solving');
           round--;
@@ -2057,19 +2571,30 @@ async function main() {
     // per touch-point time (× steps-per-cell = per move). --move-ms wins.
     const moveMsArg = argValue('--move-ms');
     const stepMs = moveMsArg != null ? Number(moveMsArg) / stepsPerCell : Number(argValue('--step-ms') ?? STEP_MS);
-    // --drag-from: prepend the card-to-board segment so the WHOLE motion
-    // (card -> board -> solved path) is one continuous drag, no lift.
-    // Extra turn-dwell applies near electric cells (touching is forbidden)
-    // AND hazard cells (touching is fine; dwell here is purely to keep the
-    // ACTUAL swap sequence matching the verified-safe planned one, per the
-    // hazardDwellCells comment above).
     const dwellCells = [...priorityCells, ...hazardDwellCells];
-    const screenPath = dragFromCol !== null
-      ? [...cardDragPrefix(dragFromCol, stepsPerCell), ...gridPathToScreenPath(sol.path, stepsPerCell, dwellCells)]
-      : gridPathToScreenPath(sol.path, stepsPerCell, dwellCells);
 
-    const dragMs = await executeTouchPath(screenPath, stepMs);
-    console.log(`[TOS] SPIN=done points=${screenPath.length} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} (moveMs excludes corner dwells)`);
+    if (rearrangeMode) {
+      // Several separate drags, one MaaTouch session (executeMultiDragPath
+      // avoids paying the ~1.5s boot cost per drag). No --drag-from/dwell
+      // considerations apply here (both already rejected at parse time for
+      // --drag-from; hazardDwellCells still meaningfully applies per-drag).
+      const screenPaths = rearrangeDrags.map(d => gridPathToScreenPath(d.path, stepsPerCell, dwellCells));
+      const dragMs = await executeMultiDragPath(screenPaths, stepMs);
+      console.log(`[TOS] SPIN=done drags=${rearrangeDrags.length} points=${screenPaths.reduce((n, p) => n + p.length, 0)} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} (moveMs excludes corner dwells; dragMs sums all drags, excludes inter-drag pauses)`);
+    } else {
+      // --drag-from: prepend the card-to-board segment so the WHOLE motion
+      // (card -> board -> solved path) is one continuous drag, no lift.
+      // Extra turn-dwell applies near electric cells (touching is forbidden)
+      // AND hazard cells (touching is fine; dwell here is purely to keep the
+      // ACTUAL swap sequence matching the verified-safe planned one, per the
+      // hazardDwellCells comment above).
+      const screenPath = dragFromCol !== null
+        ? [...cardDragPrefix(dragFromCol, stepsPerCell), ...gridPathToScreenPath(sol.path, stepsPerCell, dwellCells)]
+        : gridPathToScreenPath(sol.path, stepsPerCell, dwellCells);
+
+      const dragMs = await executeTouchPath(screenPath, stepMs);
+      console.log(`[TOS] SPIN=done points=${screenPath.length} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} (moveMs excludes corner dwells)`);
+    }
 
     // Effect check: a spin should change the board (matches or at least the
     // drag's swaps). Identical board = input was ignored (dialog, enemy

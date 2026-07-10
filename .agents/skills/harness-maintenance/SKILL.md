@@ -1,100 +1,114 @@
 ---
 name: harness-maintenance
-description: SKELETON for validating and maintaining this repository's Codex harness. When complete, use for confirmed pitfall records, consistency validation, lesson compaction, stale-path refresh, review checklists, and model-name migration planning; do not use for application changes or safety-policy weakening.
+description: Validate and maintain the Codex harness in C:\Projects\autospinner. Use when adding a confirmed/provisional workflow pitfall, checking consistency, compacting lessons, refreshing verified paths or commands, running the harness review checklist, or preparing a model-name migration plan. Do not use for application source changes, feature work, safety-policy weakening, credential changes, networked MCP enablement, repository-scope changes, or bypassing independent review.
 ---
 
 # Harness Maintenance
 
-**Status:** SKELETON  
-**Purpose:** Package repeatable, bounded Codex harness maintenance.  
-**Intended readers:** Codex agents explicitly or implicitly invoked for harness maintenance.  
-**Source-of-truth status:** Procedure only; policy remains in `../../../docs/codex-harness/05-KNOWLEDGE-ITERATION-PROTOCOL.md`.  
-**Related files:** `references/MAINTENANCE-CHECKLIST.md`, `../../../AGENTS.md`
+**Status:** COMPLETE
+**Purpose:** Execute repeatable, bounded Codex harness maintenance.
+**Intended readers:** Codex agents invoked for repository harness maintenance.
+**Source-of-truth status:** Procedure only; policy remains in [05-KNOWLEDGE-ITERATION-PROTOCOL.md](../../../docs/codex-harness/05-KNOWLEDGE-ITERATION-PROTOCOL.md).
+**Detailed checklists:** [MAINTENANCE-CHECKLIST.md](references/MAINTENANCE-CHECKLIST.md)
 
-## Sections remaining
+## Inputs
 
-- Trigger and non-trigger boundaries
-- Inputs, outputs, allowed paths, and forbidden paths
-- Maintenance task decision tree
-- Verification and independent-review requirements
-- Progressive-disclosure reference routing
-- Failure and User-approval conditions
+Require:
 
-## Overview
+- Parent objective and selected maintenance operation.
+- Exact in-scope and out-of-scope paths.
+- Current root, branch, and initial Git status.
+- Evidence supporting every proposed correction or lesson.
+- Acceptance criteria and exact verification commands.
+- Current retry key/count when continuing a failure.
+- Explicit User approval for any K3 change.
 
-Do not execute maintenance from this skeleton. Report `BLOCKED` until the skill is marked `COMPLETE`.
+Return `BLOCKED` instead of inventing a missing input.
 
-## Structuring This Skill
+## Allowed files
 
-[TODO: Choose the structure that best fits this skill's purpose. Common patterns:
+Edit only files explicitly assigned under:
 
-**1. Workflow-Based** (best for sequential processes)
-- Works well when there are clear step-by-step procedures
-- Example: DOCX skill with "Workflow Decision Tree" -> "Reading" -> "Creating" -> "Editing"
-- Structure: ## Overview -> ## Workflow Decision Tree -> ## Step 1 -> ## Step 2...
+- `AGENTS.md`
+- `.codex/**`
+- `.agents/skills/harness-maintenance/**`
+- `docs/codex-harness/**`
 
-**2. Task-Based** (best for tool collections)
-- Works well when the skill offers different operations/capabilities
-- Example: PDF skill with "Quick Start" -> "Merge PDFs" -> "Split PDFs" -> "Extract Text"
-- Structure: ## Overview -> ## Quick Start -> ## Task Category 1 -> ## Task Category 2...
+Create one sibling `.bak.<YYYYMMDD-HHMMSS>` before the first session modification of any pre-existing file. Do not back up a file first created in the same session.
 
-**3. Reference/Guidelines** (best for standards or specifications)
-- Works well for brand guidelines, coding standards, or requirements
-- Example: Brand styling with "Brand Guidelines" -> "Colors" -> "Typography" -> "Features"
-- Structure: ## Overview -> ## Guidelines -> ## Specifications -> ## Usage...
+## Forbidden files and actions
 
-**4. Capabilities-Based** (best for integrated systems)
-- Works well when the skill provides multiple interrelated features
-- Example: Product Management with "Core Capabilities" -> numbered capability list
-- Structure: ## Overview -> ## Core Capabilities -> ### 1. Feature -> ### 2. Feature...
+Do not modify:
 
-Patterns can be mixed and matched as needed. Most skills combine patterns (e.g., start with task-based, add workflow for complex operations).
+- Application source, tests, manifests, or generated phone/browser artifacts.
+- `CLAUDE.md`, `.claude/**`, `.git/**`, global Codex files, or another repository.
+- Credentials, environment secrets, dependencies, production state, or Git history.
 
-Delete this entire "Structuring This Skill" section when done - it's just guidance.]
+Do not weaken/disable hooks, verification, review, retry limits, circuit breakers, or the repository boundary. Do not add a networked MCP/app/plugin, change agent recursion/fan-out authority, delete evidence/backups, commit, or create a bypass.
 
-## [TODO: Replace with the first main section based on chosen structure]
+## Select one operation
 
-[TODO: Add content here. See examples in existing skills:
-- Code samples for technical skills
-- Decision trees for complex workflows
-- Concrete examples with realistic user requests
-- References to scripts/templates/references as needed]
+Read only the matching checklist section in the detailed reference.
 
-## Resources (optional)
+1. **Validate consistency:** Run validator/self-tests, inspect every failure, and make no edit unless evidence establishes a K1/K2 correction.
+2. **Add a pitfall:** Search existing records; use all required fields; label unproven root cause/prevention `PROVISIONAL`.
+3. **Compact lessons:** Trigger only at documented thresholds; preserve IDs/evidence; create an archive only when real content moves.
+4. **Refresh paths or commands:** Re-run the command or re-read the current symbol before correcting it; do not hard-code volatile check totals.
+5. **Run harness review:** Dispatch the distinct read-only `fresh-context-reviewer`; do not self-accept.
+6. **Plan a model-name migration:** Verify availability, map capability tiers, and produce a plan. Do not change dispatch authority or pin a model without the required approval and test.
 
-Create only the resource directories this skill actually needs. Delete this section if no resources are required.
+Do not combine operations when separate acceptance/review would be clearer.
 
-### scripts/
-Executable code (Python/Bash/etc.) that can be run directly to perform specific operations.
+## Workflow
 
-**Examples from other skills:**
-- PDF skill: `fill_fillable_fields.py`, `extract_form_field_info.py` - utilities for PDF manipulation
-- DOCX skill: `document.py`, `utilities.py` - Python modules for document processing
+1. Verify the exact root `C:\Projects\autospinner`.
+2. Record branch/status and distinguish pre-existing User work.
+3. Read [the knowledge protocol](../../../docs/codex-harness/05-KNOWLEDGE-ITERATION-PROTOCOL.md) and classify K1, K2, or K3.
+4. Stop for K3 unless the User approved the exact proposal.
+5. Read the selected checklist section only.
+6. Back up allowed pre-existing files before editing.
+7. Apply the smallest evidence-backed patch with no application changes.
+8. Read back every changed file.
+9. Run the required checks below plus operation-specific checks.
+10. Dispatch independent read-only review and correct valid findings.
+11. Report evidence and limitations; do not commit unless requested.
 
-**Appropriate for:** Python scripts, shell scripts, or any executable code that performs automation, data processing, or specific operations.
+## Verification
 
-**Note:** Scripts may be executed without loading into context, but can still be read by Codex for patching or environment adjustments.
+Run from the repository root:
 
-### references/
-Documentation and reference material intended to be loaded into context to inform Codex's process and thinking.
+```powershell
+node --check .codex\hooks\pre-tool-use-guard.js
+node --check .codex\hooks\completion-evidence-guard.js
+node --check .codex\hooks\test-hooks.js
+node --check .codex\hooks\validate-harness.js
+node .codex\hooks\test-hooks.js
+node .codex\hooks\validate-harness.js
+git -c safe.directory=C:/Projects/autospinner diff --check
+```
 
-**Examples from other skills:**
-- Product management: `communication.md`, `context_building.md` - detailed workflow guides
-- BigQuery: API reference documentation and query examples
-- Finance: Schema documentation, company policies
+Validate the skill with the installed skill-creator validator when available. Treat a missing validator dependency as a documented blocker, not a pass.
 
-**Appropriate for:** In-depth documentation, API references, database schemas, comprehensive guides, or any detailed information that Codex should reference while working.
+Require a distinct `fresh-context-reviewer` verdict with zero unresolved Critical/High findings. Syntax success does not prove hook loading or behavioral enforcement; verify project/hook loading in a new trusted session.
 
-### assets/
-Files not intended to be loaded into context, but rather used within the output Codex produces.
+## Retry and stop conditions
 
-**Examples from other skills:**
-- Brand styling: PowerPoint template files (.pptx), logo files
-- Frontend builder: HTML/React boilerplate project directories
-- Typography: Font files (.ttf, .woff2)
+- Allow at most two materially different repair attempts per capability tier.
+- Escalate a low/fast tool, command, path, or syntax error after one failure.
+- Never repeat an identical failed command without new evidence.
+- Stop for an out-of-scope file, policy change, secret risk, pre-existing-work collision, unavailable authority, or exhausted retry budget.
+- Revert only session-owned changes when abandoning a path.
 
-**Appropriate for:** Templates, boilerplate code, document templates, images, icons, fonts, or any files meant to be copied or used in the final output.
+## Output
 
----
+Return:
 
-**Not every skill requires all three types of resources.**
+- `Status: PASS | PARTIAL | BLOCKED | FAIL`
+- No more than ten summary bullets.
+- Exact files changed and backups.
+- Commands and exit codes.
+- Requirement/check results.
+- Independent reviewer identity/verdict/findings.
+- Unresolved limitations and next action.
+
+Do not paste complete files, logs, diffs, code, or sensitive values.

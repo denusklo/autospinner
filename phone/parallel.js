@@ -25,7 +25,7 @@
 
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const os = require('os');
-const { Board, DoraSolver, TargetPlanner, solveMaxFirstCombos, computeMaxFirstCombosBound, FROZEN, SHIELD_BASE } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, computeMaxFirstCombosBound, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
 
 /** Leave one core for the OS/adb; at least 1. Override with --workers. */
 function defaultWorkers() {
@@ -52,7 +52,9 @@ function qualifies(sol, options, clearTypeTotals) {
   const endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
   if (endCells && !endCells.some(e => last.x === e.x && last.y === e.y)) return false;
   const minC = options.minFirstCombos ?? 0, minR = options.minFirstRunes ?? 0;
+  const minAC = options.minFirstAttrCombos ?? 0;
   if (minC > 0 && (options.exactFirstCombos ? sol.firstCombos !== minC : sol.firstCombos < minC)) return false;
+  if (minAC > 0 && (options.exactFirstAttrCombos ? sol.firstAttrCombos !== minAC : sol.firstAttrCombos < minAC)) return false;
   if (minR > 0 && (options.exactFirstRunes ? sol.firstRunes !== minR : sol.firstRunes < minR)) return false;
   for (const t of options.clearTypes ?? []) {
     if (sol.firstClearedByType[t] < clearTypeTotals[t]) return false;
@@ -63,13 +65,27 @@ function qualifies(sol, options, clearTypeTotals) {
   for (const t of options.firstWaveHaveTypes ?? []) {
     if ((sol.firstClearedByType[t] ?? 0) === 0) return false;
   }
+  const wantType = options.wantGroupType ?? null;
+  if (wantType !== null) {
+    // Best-effort target (P46-adjacent) — sol.firstClearedByType only
+    // covers wave 1, but "any wave" needs the full group list, which isn't
+    // in the _solution() shape returned across the worker boundary. Cheap
+    // to re-derive: one resolve() call per worker result, not per beam step.
+    const sim = BoardSimulator.resolve(sol.board, {
+      sealedColumns: options.sealedColumns, flags: options.flags, twoMatch: options.twoMatch,
+      noSolvableTypes: options.noSolvableTypes, hazardPositions: options.hazardPositions,
+      reserveTypes: (options.reserveTypes ?? []).length > 0 ? options.reserveTypes : null,
+    });
+    if (!sim.groups.some(g => g.type === wantType && g.cells.length === (options.wantGroupSize ?? 0))) return false;
+  }
   return true;
 }
 
 function hasDemands(options) {
-  return (options.minFirstCombos ?? 0) > 0 || (options.minFirstRunes ?? 0) > 0
+  return (options.minFirstCombos ?? 0) > 0 || (options.minFirstAttrCombos ?? 0) > 0
+    || (options.minFirstRunes ?? 0) > 0
     || (options.clearTypes ?? []).length > 0 || (options.firstWaveNoTypes ?? []).length > 0
-    || (options.firstWaveHaveTypes ?? []).length > 0;
+    || (options.firstWaveHaveTypes ?? []).length > 0 || (options.wantGroupType ?? null) !== null;
 }
 
 // clearTypes and firstWaveHaveTypes are MANDATORY demands (P14/P32), unlike
@@ -154,7 +170,7 @@ async function solveDoraParallel(board, options = {}, workers = defaultWorkers()
   const finalize = () => {
     const pick = bestQualified ?? bestHardOnly ?? best;
     if (pick === null) {
-      return { startX: 0, startY: 0, path: [{ x: 0, y: 0 }], moves: [], score: 0, comboCount: 0, firstCombos: 0, firstRunes: 0, firstClearedByType: Array(6).fill(0), chains: 0, board: board.clone() };
+      return { startX: 0, startY: 0, path: [{ x: 0, y: 0 }], moves: [], score: 0, comboCount: 0, firstCombos: 0, firstAttrCombos: 0, firstRunes: 0, firstClearedByType: Array(6).fill(0), chains: 0, board: board.clone() };
     }
     return reviveBoard(pick);
   };
@@ -172,9 +188,9 @@ async function solveDoraParallel(board, options = {}, workers = defaultWorkers()
   for (let y = 0; y < board.height; y++) {
     for (let x = 0; x < board.width; x++) {
       const v = board.get(x, y);
-      // Shielded runes ARE owed here (P30) — they dissolve normally; only
-      // true FROZEN runes never dissolve and stay un-owed.
-      const bt = v >= SHIELD_BASE ? v - SHIELD_BASE : v;
+      // Shielded/cursed runes ARE owed here (P30/P37) — both dissolve
+      // normally; only true FROZEN runes never dissolve and stay un-owed.
+      const bt = v >= CURSE_BASE ? v - CURSE_BASE : (v >= SHIELD_BASE ? v - SHIELD_BASE : v);
       if (bt >= 0 && bt < FROZEN) clearTypeTotals[bt]++;
     }
   }
@@ -339,18 +355,24 @@ async function solveMaxFirstCombosParallel(board, options = {}, workers = defaul
   const reserveTypes = opts.reserveTypes ?? [];
   const noSolvableTypes = opts.noSolvableTypes ?? [];
   const hazardPositions = opts.hazardPositions ?? null;
+  const minFirstAttrCombos = opts.minFirstAttrCombos ?? 0;
+  const exactFirstAttrCombos = opts.exactFirstAttrCombos ?? false;
+  const convertType = opts.convertType ?? null;
+  const convertCount = opts.convertCount ?? 0;
+  const wantGroupType = opts.wantGroupType ?? null;
+  const wantGroupSize = opts.wantGroupSize ?? 0;
   const bound = computeMaxFirstCombosBound(board, opts);
 
   const dora = await solveDoraParallel(board, {
     beamWidth: opts.beamWidth ?? 200, maxPath: opts.maxPath ?? 30,
-    sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: opts.priorityCells ?? [], startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+    sealedColumns, flags, minFirstCombos: bound, minFirstAttrCombos, exactFirstAttrCombos,
+    priorityCells: opts.priorityCells ?? [], startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount, wantGroupType, wantGroupSize,
   }, workers);
   let best = dora, achieved = dora.firstCombos;
 
   for (let n = bound; n > achieved; n--) {
     const plannerOpts = {
-      sealedColumns, flags, minFirstCombos: n,
+      sealedColumns, flags, minFirstCombos: n, minFirstAttrCombos, exactFirstAttrCombos, convertType, convertCount,
       beamWidth: opts.plannerBeamWidth ?? 300,
       maxPath: opts.plannerMaxPath ?? 60,
       startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,

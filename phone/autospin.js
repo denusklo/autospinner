@@ -20,7 +20,10 @@
  *                                                # (楊玉環 "NUM N" boss: read N off the enemy
  *                                                # badge; distinct from combo COUNT)
  *   node phone/autospin.js --first-runes 20+     # at least 20 first-wave runes
- *     For all three: DoraSolver tries first, TargetPlanner constructs the
+ *   node phone/autospin.js --first-wave-no=f,g   # first wave must NOT dissolve
+ *                                                # Fire or Wood; those types may
+ *                                                # still dissolve after gravity
+ *     For first-wave constraints: DoraSolver tries first, TargetPlanner constructs the
  *     arrangement if the beam misses, abort only if impossible/unroutable
  *     (no touch sent on abort). --first-min-combos N = legacy alias for N+.
  *   node phone/autospin.js --clear-all heart      # first wave must dissolve EVERY
@@ -91,6 +94,20 @@
  *                                             # bright glow defeats auto-detection: one letter
  *                                             # for all, or a comma list mapping to the
  *                                             # ELECTRIC_CELLS row-major order (e.g. w,l,d)
+ *   node phone/autospin.js --drag-from=2      # drag from card 2 (1-6, left to right) instead
+ *                                             # of a board cell: auto-reads that card's element
+ *                                             # badge (live screen capture, required even with
+ *                                             # --board) and drops a rune of that element at
+ *                                             # (card-1, 0), displacing whatever was read there,
+ *                                             # BEFORE solving. One continuous drag (card -> that
+ *                                             # cell -> the rest of the solved path) — forces
+ *                                             # --start to (card-1,0), overriding any --start
+ *                                             # you pass. Unrecognized card badge = abort, no
+ *                                             # touch sent (add its color to CARD_SIGNATURES).
+ *   node phone/autospin.js --no-solvable-type=fire # override the locked element for the
+ *                                             # board-wide no-solvable prohibition-ring overlay
+ *                                             # (any cell, `%` suffix; auto-detected but the ring
+ *                                             # color can't be reliably read — default Wood).
  *
  * Board file: 5 lines x 6 tokens (comma/space separated). Tokens: w=Water
  * f=Fire g=Wood(green) l=Light d=Dark h=Heart or digits 0-5. Suffixes
@@ -124,6 +141,20 @@ const { solveDoraParallel, solveClearAllParallel, solveMaxFirstCombosParallel, d
 const COLS = [90, 270, 450, 630, 810, 990];
 const ROWS = [1330, 1510, 1690, 1870, 2050];
 const PATCH_HALF = 55, PATCH_STEP = 5;
+
+// --drag-from card geometry (Mi 9T Pro, live-measured 2026-07-10). The 6
+// character cards sit in a row above the board; their horizontal centers
+// align with the board's own COLS (confirmed: card box left edges measured
+// at 10,192,... i.e. exactly a 180px cell width apart, box center ~= COLS).
+// CARD_TOUCH_Y = card box vertical center (1020-1178), used as the physical
+// touch-down point. CARD_BADGE_X/Y = the small element-icon badge in each
+// card's top-left corner (offset from the box, NOT centered on COLS), used
+// only for color sampling — measured center (34,1042) for card 1, spaced by
+// the same 180px column width.
+const CARD_TOUCH_Y = 1099;
+const CARD_BADGE_X = [34, 214, 394, 574, 754, 934];
+const CARD_BADGE_Y = 1042;
+const CARD_PATCH_HALF = 10, CARD_PATCH_STEP = 2;
 // Drag pacing: PC-side deadline-scheduled writes. The held rune TRAILS the
 // finger and cuts corners at speed (into shock cells — P11); human-like
 // pacing plus turn dwells (gridPathToScreenPath) keep it on the finger's
@@ -152,6 +183,11 @@ const SIGNATURES = [
   { type: 5, thorn: false, rgb: [253, 183, 204] }, // Heart enhanced (white sparkle)
   { type: 0, thorn: false, electric: true, rgb: [172, 248, 247] }, // Electric rune (flicker phase A)
   { type: 0, thorn: false, electric: true, rgb: [191, 251, 250] }, // Electric rune (flicker phase B)
+  // ICED pre-freeze state: still dissolves as its base element this turn, but
+  // should be prioritized because survivors become FROZEN for later rounds.
+  { type: 4, thorn: false, iced: true, rgb: [168, 110, 225] },       // Iced Dark, live 2026-07-10
+  { type: 5, thorn: false, iced: true, rgb: [190, 140, 206] },       // Iced Heart, live 2026-07-10
+  { type: 0, thorn: false, iced: true, rgb: [115, 162, 217] },       // Iced Water, live 2026-07-10
   // FROZEN rune (ice mechanic, P16). Two states: an ICED rune is fully normal
   // and dissolvable (dissolve it that round or it freezes!); if it survives a
   // spin round it becomes FROZEN for 3 rounds — can move/drag/pass-through
@@ -166,6 +202,9 @@ const SIGNATURES = [
   // solver board instead of a positional flag; the placeholder type here is
   // display-only. Measured live 2026-07-08.
   { type: 1, thorn: false, frozen: true, rgb: [176, 171, 210] },     // Frozen (shell, round 1 of 3)
+  { type: 1, thorn: false, frozen: true, rgb: [178, 112, 123] },     // Frozen Fire shell, 2 rounds left, brighter crystal, live 2026-07-10
+  { type: 1, thorn: true, frozen: true, rgb: [114, 112, 130] },       // Frozen + thorn/fence overlay, live 2026-07-09
+  { type: 1, thorn: true, frozen: true, rgb: [115, 90, 95] },         // Frozen Fire + thorn/fence overlay, 2 rounds left, live 2026-07-10
   { type: 0, thorn: true, rgb: [70, 98, 119] },    // Water + thorn
   { type: 1, thorn: true, rgb: [129, 61, 53] },    // Fire + thorn
   { type: 2, thorn: true, rgb: [59, 116, 62] },    // Wood + thorn
@@ -174,12 +213,93 @@ const SIGNATURES = [
   { type: 5, thorn: true, rgb: [140, 79, 113] },   // Heart + thorn
 ];
 const MAX_SIG_DIST = 60;
+
+// Chromaticity (r,g,b normalized to sum=1): brightness-invariant color, same
+// principle as electricBase's glare-floor subtraction. Defined here (used by
+// EDGE_HAZARD_SIGNATURES below, evaluated at module load) and again by
+// classifyEdgeHazardBase per live sample.
+function chroma(rgb) {
+  const s = rgb[0] + rgb[1] + rgb[2];
+  return [rgb[0] / s, rgb[1] / s, rgb[2] / s];
+}
+
+// Fiery edge-hazard overlay (left/right columns): the flame masks the normal
+// board signature, so classify the hidden base from the center patch only.
+// Live-calibrated from user-confirmed labels, 2026-07-10. Classified in
+// CHROMATICITY space, not raw RGB: the flame's brightness varies by scene
+// lighting/animation phase, and two live captures of the SAME board (~13%
+// apart in absolute brightness) gave the SAME chromaticity per cell but
+// different (wrong) nearest-signature results under raw Euclidean RGB
+// distance — confirming the hazard's base type is a fixed per-cell property
+// (never changes turn-to-turn) that raw-RGB matching was failing to read
+// consistently.
+// ⚠️ Heart and Water are NOT reliably separable at this overlay (found live
+// 2026-07-10): on one board, User-confirmed (5,2)=Heart and (0,3)=Water
+// measured (169,86,67) and (169,86,67) — literally under 1 RGB unit apart at
+// every patch size tested (10/20/35/50), not a sampling artifact. Whatever
+// visually distinguishes them here isn't average color. Both entries are
+// kept (better to sometimes guess wrong between Heart/Water than refuse and
+// block settling), but a nearest-match hit on either should be treated as
+// LOW CONFIDENCE for that specific distinction — Dark/Fire/Light stay well
+// separated (0.10+ margin) so cross-matching into those remains rare.
+const EDGE_HAZARD_SIGNATURES = [
+  { type: 1, rgb: [149, 60, 30], chroma: chroma([149, 60, 30]) }, // Fire
+  { type: 3, rgb: [145, 74, 29], chroma: chroma([145, 74, 29]) }, // Light
+  { type: 4, rgb: [146, 55, 59], chroma: chroma([146, 55, 59]) }, // Dark
+  { type: 5, rgb: [156, 60, 52], chroma: chroma([156, 60, 52]) }, // Heart
+  { type: 0, rgb: [149, 94, 74], chroma: chroma([149, 94, 74]) }, // Water (earlier board, User-confirmed 2026-07-10)
+  { type: 5, rgb: [169, 86, 67], chroma: chroma([169, 86, 67]) }, // Heart (5,2), User-confirmed 2026-07-10
+  { type: 0, rgb: [169, 86, 67], chroma: chroma([169, 86, 67]) }, // Water (0,3), User-confirmed 2026-07-10 — see ambiguity note above
+  { type: 4, rgb: [167, 88, 79], chroma: chroma([167, 88, 79]) }, // Dark (5,3), User-confirmed 2026-07-10
+  { type: 5, rgb: [167, 86, 66], chroma: chroma([167, 86, 66]) }, // Heart (0,4), User-confirmed 2026-07-10
+];
+// Raised 0.035->0.08 (2026-07-10) to include the new calibration points
+// above (measured 0.044-0.073 from the nearest PRE-EXISTING signature) —
+// still a comfortable margin under the nearest WRONG-type distance (Fire/
+// Light stayed 0.11+ away in the same measurement), so this doesn't create
+// new false-positive risk, it just accepts the Heart/Water ambiguity above.
+const MAX_EDGE_HAZARD_DIST = 0.08;
+
+// --drag-from card-badge signatures (separate palette from board SIGNATURES
+// above — the UI icon's colors are brighter/more saturated than in-board
+// runes; a badge Dark sample is ~115 units from the board Dark signature,
+// well past MAX_SIG_DIST, so reusing SIGNATURES would misclassify). Same
+// nearest-signature convention: HARD RULE (L8) every entry is a LIVE patch
+// average, never extrapolated. Dark confirmed by the User directly (3 cards,
+// same element, notably different brightness/saturation per card — this
+// game renders Dark's badge with real per-character variance, not one fixed
+// color, hence 3 entries for one type). Wood/Water are inferred from
+// standard icon shape (leaf / wave) but NOT explicitly User-confirmed like
+// Dark was. Fire/Light/Heart are UNMEASURED — the unknown-guard below
+// refuses and prints the measured rgb so entries can be added here.
+const CARD_SIGNATURES = [
+  { type: 4, rgb: [219.7, 141.1, 211.3] }, // Dark (card 1), confirmed
+  { type: 4, rgb: [192.0, 110.5, 186.8] }, // Dark (card 4), confirmed
+  { type: 4, rgb: [192.5, 76.5, 202.4] },  // Dark (card 6), confirmed
+  { type: 2, rgb: [102.0, 170.5, 51.0] },  // Wood (card 2), inferred from leaf icon
+  { type: 2, rgb: [98.3, 165.3, 49.2] },   // Wood (card 3), inferred from leaf icon
+  { type: 0, rgb: [77.2, 148.1, 204.4] },  // Water (card 5), inferred from wave icon
+];
+const MAX_CARD_SIG_DIST = 90; // Dark's own internal spread reaches ~71; cross-type distance is 200+
 const TYPE_NAMES = ['Water', 'Fire', 'Wood', 'Light', 'Dark', 'Heart'];
 const TYPE_LETTERS = ['w', 'f', 'g', 'l', 'd', 'h'];
 const TYPE_CSS = ['#44a0e0', '#e03020', '#30c040', '#d0a020', '#a040d0', '#e060a0'];
 
+// Edge-hazard cells (P22) are classified against a DIFFERENT signature table
+// in CHROMATICITY units (MAX_EDGE_HAZARD_DIST=0.035, vs the board's raw-RGB
+// MAX_SIG_DIST=60) — a flat MAX_SIG_DIST check would silently pass a truly
+// unknown edge-hazard base whose chromaticity distance is actually large.
+const cellUnknown = c => c.dist > (c.edgeNoClear ? MAX_EDGE_HAZARD_DIST : MAX_SIG_DIST);
+
+// Bug found live 2026-07-10: displaying an edge-hazard cell's chromaticity
+// distance (scale ~0.01-0.1) with .toFixed(0) always prints "d=0" — even for
+// a genuinely-failing distance like 0.08 — making a real classification
+// failure look like a confidently-suppressed dist=0. Use enough decimals for
+// the scale actually in play.
+const distStr = c => (c.edgeNoClear ? c.dist.toFixed(4) : c.dist.toFixed(0));
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const cellLabel = c => (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.frozen ? '#' : '')) + (c.thorn ? '*' : '');
+const cellLabel = c => (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.iced ? '~' : '') + (c.frozen ? '#' : '') + (c.noSolvable ? '%' : '') + (c.edgeNoClear ? '$' : '')) + (c.thorn ? '*' : '') + (c.go ? '@' : '');
 
 // ---------- capture + recognition ----------
 
@@ -200,10 +320,10 @@ function capturePng(outFile) {
   execSync(`adb pull /sdcard/tos_screen.png "${outFile}"`, { stdio: 'pipe' });
 }
 
-function cellStats(img, cx, cy) {
+function cellStats(img, cx, cy, half = PATCH_HALF, step = PATCH_STEP) {
   let r = 0, g = 0, b = 0, n = 0, dark = 0;
-  for (let dy = -PATCH_HALF; dy <= PATCH_HALF; dy += PATCH_STEP) {
-    for (let dx = -PATCH_HALF; dx <= PATCH_HALF; dx += PATCH_STEP) {
+  for (let dy = -half; dy <= half; dy += step) {
+    for (let dx = -half; dx <= half; dx += step) {
       const i = img.off + ((cy + dy) * img.w + (cx + dx)) * 4;
       const pr = img.buf[i], pg = img.buf[i + 1], pb = img.buf[i + 2];
       r += pr; g += pg; b += pb; n++;
@@ -211,6 +331,140 @@ function cellStats(img, cx, cy) {
     }
   }
   return { rgb: [r / n, g / n, b / n], darkPct: dark / n };
+}
+
+function cellCornerStats(img, cx, cy) {
+  let r = 0, g = 0, b = 0, n = 0, dark = 0;
+  for (let dy = -PATCH_HALF; dy <= PATCH_HALF; dy += PATCH_STEP) {
+    for (let dx = -PATCH_HALF; dx <= PATCH_HALF; dx += PATCH_STEP) {
+      if (Math.abs(dx) <= 25 || Math.abs(dy) <= 25) continue;
+      const i = img.off + ((cy + dy) * img.w + (cx + dx)) * 4;
+      const pr = img.buf[i], pg = img.buf[i + 1], pb = img.buf[i + 2];
+      r += pr; g += pg; b += pb; n++;
+      if (pr + pg + pb < 120) dark++;
+    }
+  }
+  return { rgb: [r / n, g / n, b / n], darkPct: dark / n };
+}
+
+function isGoOverlayStats(stats) {
+  const [r, g, b] = stats.rgb;
+  return (g > 190 && r >= 70 && r <= 150 && b >= 70 && b <= 160 && stats.darkPct < 0.12)
+    || (g > 160 && r >= 80 && r <= 155 && b >= 80 && b <= 155
+      && Math.abs(r - b) <= 30 && g - Math.max(r, b) >= 25 && stats.darkPct < 0.30);
+}
+
+function classifyGoCoveredCell(stats) {
+  const [r, g, b] = stats.rgb;
+  if (g - Math.max(r, b) >= 25 && Math.abs(r - b) <= 30) {
+    const thorn = stats.darkPct > 0.2;
+    const sig = thorn ? SIGNATURES.find(s => s.type === 2 && s.thorn)
+                      : SIGNATURES.find(s => s.type === 2 && !s.thorn && !s.iced && !s.frozen && !s.electric);
+    const dist = Math.hypot(r - sig.rgb[0], g - sig.rgb[1], b - sig.rgb[2]);
+    return { type: 2, thorn, electric: false, iced: false, frozen: false, dist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+  }
+  return classifyNormal(stats);
+}
+
+function noSolvableOverlayStats(img, cx, cy) {
+  let muted = 0, brown = 0, darkGreen = 0, n = 0;
+  for (let dy = -70; dy <= 70; dy += 2) {
+    for (let dx = -70; dx <= 70; dx += 2) {
+      const i = img.off + ((cy + dy) * img.w + (cx + dx)) * 4;
+      const r = img.buf[i], g = img.buf[i + 1], b = img.buf[i + 2];
+      n++;
+      if (r >= 60 && r <= 150 && g >= 75 && g <= 170 && b >= 45 && b <= 130
+          && Math.abs(g - r) < 70 && g >= b) muted++;
+      if (r >= 90 && r <= 170 && g >= 55 && g <= 140 && b >= 25 && b <= 100
+          && r >= g && g >= b) brown++;
+      if (r >= 25 && r <= 100 && g >= 70 && g <= 150 && b >= 25 && b <= 100
+          && g - r > 25 && g - b > 25) darkGreen++;
+    }
+  }
+  return { mutedPct: muted / n, brownPct: brown / n, darkGreenPct: darkGreen / n };
+}
+
+function hasNoSolvableOverlay(img, cx, cy) {
+  const s = noSolvableOverlayStats(img, cx, cy);
+  return s.darkGreenPct > 0.18 && s.mutedPct > 0.08 && s.brownPct > 0.06;
+}
+
+/**
+ * Secondary, lower-threshold green check for a cell that ALSO has the fire
+ * overlay (P22): a cell can carry BOTH the no-solvable ring AND the fire
+ * texture at once (User-confirmed live 2026-07-10), and the flame obscures
+ * most of the ring — hasNoSolvableOverlay's wide-area percentage thresholds
+ * never cross (measured live: darkGreenPct ~0.012 on 3 confirmed dual-hazard
+ * cells, vs its 0.18 requirement). Green pixels peeking through flame gaps
+ * are real but sparse: measured live 0.042-0.047 on the 3 dual cells vs
+ * 0.005 on a genuinely fire-only cell and 0.55 on an unobscured ring — a
+ * comfortable margin above the fire-only baseline, well below a full ring.
+ */
+function hasGreenTintUnderFire(img, cx, cy) {
+  let green = 0, n = 0;
+  for (let dy = -70; dy <= 70; dy += 2) {
+    for (let dx = -70; dx <= 70; dx += 2) {
+      const i = img.off + ((cy + dy) * img.w + (cx + dx)) * 4;
+      const r = img.buf[i], g = img.buf[i + 1], b = img.buf[i + 2];
+      n++;
+      if (g > r && g > b && g > 60) green++;
+    }
+  }
+  return (green / n) > 0.02;
+}
+
+function edgeNoClearOverlayStats(img, cx, cy) {
+  let fire = 0, yellow = 0, dark = 0, n = 0;
+  for (let dy = -70; dy <= 70; dy += 2) {
+    for (let dx = -70; dx <= 70; dx += 2) {
+      const i = img.off + ((cy + dy) * img.w + (cx + dx)) * 4;
+      const r = img.buf[i], g = img.buf[i + 1], b = img.buf[i + 2];
+      n++;
+      if (r > 150 && g > 45 && g < 170 && b < 90 && r - b > 80) fire++;
+      if (r > 180 && g > 120 && b < 90) yellow++;
+      if (r + g + b < 120) dark++;
+    }
+  }
+  return { firePct: fire / n, yellowPct: yellow / n, darkPct: dark / n };
+}
+
+function hasEdgeNoClearOverlay(img, cx, cy) {
+  const s = edgeNoClearOverlayStats(img, cx, cy);
+  // darkPct threshold lowered 0.28->0.20 (bug found live 2026-07-10): all 10
+  // genuine fire-hazard cells on a live board measured darkPct 0.272-0.303,
+  // but 3 of them fell just under the old 0.28 cutoff, causing flaky
+  // detection (flip-flopping true/false across captures -> the board could
+  // never settle). The closest false-positive risk (a plain Light gem, whose
+  // own warm color satisfies firePct/yellowPct) measured darkPct 0.173 —
+  // 0.20 keeps a comfortable margin on both sides.
+  return s.firePct > 0.18 && s.yellowPct > 0.05 && s.darkPct > 0.20;
+}
+
+function classifyEdgeHazardBase(img, cx, cy) {
+  const stats = cellStats(img, cx, cy, 35, 4);
+  const c = chroma(stats.rgb);
+  let best = null, bestDist = Infinity;
+  for (const sig of EDGE_HAZARD_SIGNATURES) {
+    const d = Math.hypot(c[0] - sig.chroma[0], c[1] - sig.chroma[1], c[2] - sig.chroma[2]);
+    if (d < bestDist) { bestDist = d; best = sig; }
+  }
+  return { type: best.type, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+}
+
+/**
+ * Classify the element badge of card `cardIdx` (0-indexed, 0-5) via nearest
+ * CARD_SIGNATURES match. Same unknown-guard convention as board cells: a
+ * distance past MAX_CARD_SIG_DIST means no calibrated signature is close
+ * enough — the caller must refuse rather than guess (L8).
+ */
+function readCardBadge(img, cardIdx) {
+  const stats = cellStats(img, CARD_BADGE_X[cardIdx], CARD_BADGE_Y, CARD_PATCH_HALF, CARD_PATCH_STEP);
+  let best = null, bestDist = Infinity;
+  for (const sig of CARD_SIGNATURES) {
+    const d = Math.hypot(stats.rgb[0] - sig.rgb[0], stats.rgb[1] - sig.rgb[1], stats.rgb[2] - sig.rgb[2]);
+    if (d < bestDist) { bestDist = d; best = sig; }
+  }
+  return { type: best ? best.type : -1, dist: bestDist, rgb: stats.rgb.map(Math.round) };
 }
 
 // Electric glow rule (P11): arcs push at least TWO channels near-white —
@@ -242,7 +496,18 @@ function classify(stats, skipGlow = false) {
   // Two independent thorn signals: nearest signature + dark-pixel share (P5).
   // Trust the dark-pixel metric when they disagree.
   const thorn = stats.darkPct > 0.2;
-  return { type: best.type, thorn, electric: best.electric ?? false, frozen: best.frozen ?? false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+  return { type: best.type, thorn, electric: best.electric ?? false, iced: best.iced ?? false, frozen: best.frozen ?? false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+}
+
+function classifyNormal(stats) {
+  let best = null, bestDist = Infinity;
+  for (const sig of SIGNATURES) {
+    if (sig.electric || sig.iced || sig.frozen) continue;
+    const d = Math.hypot(stats.rgb[0] - sig.rgb[0], stats.rgb[1] - sig.rgb[1], stats.rgb[2] - sig.rgb[2]);
+    if (d < bestDist) { bestDist = d; best = sig; }
+  }
+  const thorn = stats.darkPct > 0.2;
+  return { type: best.type, thorn, electric: false, iced: false, frozen: false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
 }
 
 /**
@@ -296,14 +561,109 @@ function electricBase(imgs, cx, cy) {
   return 0;                              // red floor -> Water (cyan/blue)
 }
 
+// The no-solvable prohibition-ring overlay locks a single element for the
+// whole stage (P22) — its color can't be reliably recovered from the ring's
+// translucent tint (see hasNoSolvableOverlay call site), so the type is an
+// explicit default, overridable with --no-solvable-type=X (letter/name/digit,
+// same convention as --clear-all/--2-match) rather than a per-cell guess.
+function noSolvableTypeOverride() {
+  const raw = argValue('--no-solvable-type');
+  if (raw === null) return 2; // Wood — User-confirmed default (boss skill text), 2026-07-10
+  const tok = raw.trim().toLowerCase();
+  const t = /^[0-5]$/.test(tok) ? Number(tok)
+    : TYPE_LETTERS.indexOf(tok) !== -1 ? TYPE_LETTERS.indexOf(tok)
+    : TYPE_NAMES.map(n => n.toLowerCase()).indexOf(tok);
+  if (t === -1) throw new Error(`--no-solvable-type: unknown rune type "${raw}" (use ${TYPE_NAMES.join('/')}, ${TYPE_LETTERS.join('/')}, or 0-5)`);
+  return t;
+}
+
+/**
+ * Full layered classification for one board cell against a single captured
+ * frame: base signature match -> go-overlay -> no-solvable ring -> edge fire
+ * hazard (P22). Shared by BOTH the normal first pass below AND the electric-
+ * burst reclassification pass, which used to call plain classify() directly
+ * and silently DISCARD every overlay layer for every non-electric cell on
+ * the board the moment ANY cell anywhere looked like an electric candidate
+ * (bug found live 2026-07-10 — see LESSONS L32). skipGlow mirrors classify().
+ */
+function classifyBoardCell(img, gx, gy, noSolvableType, skipGlow = false) {
+  const cx = COLS[gx], cy = ROWS[gy];
+  const stats = cellStats(img, cx, cy);
+  let c = classify(stats, skipGlow);
+  if (c.dist > MAX_SIG_DIST && isGoOverlayStats(stats)) {
+    const edge = classifyGoCoveredCell(cellCornerStats(img, cx, cy));
+    if (edge.dist <= MAX_SIG_DIST) c = {...edge, go: true};
+  }
+  if (!c.frozen && hasNoSolvableOverlay(img, cx, cy)) {
+    // The prohibition ring is a TRANSLUCENT TINT of the underlying gem's own
+    // color (verified live 2026-07-10 via zoomed crop: green ring on a Wood
+    // gem, not a fixed color), but unlike the fire overlay (P22) there is no
+    // clean gap showing pure base color — the ring's white outline/slash
+    // lines dilute the whole-cell average pervasively. Measured live: raw-RGB
+    // nearest match landed on Wood but at dist~98 (past MAX_SIG_DIST);
+    // CHROMATICITY nearest match flipped to Light (also a poor, ambiguous
+    // fit) — neither whole-cell-average approach reliably recovers the true
+    // type under THIS overlay. Since the locked element is a single
+    // STAGE-WIDE constant (User-confirmed: Wood here, from the boss's own
+    // skill text — far more reliable than pixel-guessing), use an explicit
+    // default with a CLI override (--no-solvable-type) rather than a fragile
+    // per-cell color guess.
+    // ⚠️ hasNoSolvableOverlay's own detection thresholds are calibrated
+    // ONLY for a GREEN-tinted ring — a differently-colored ring (a future
+    // stage locking a different element) may not be DETECTED at all (a
+    // silent miss, not a misclassification) until recalibrated live.
+    c.type = noSolvableType;
+    c.electric = false;
+    c.iced = false;
+    c.frozen = false;
+    c.noSolvable = true;
+    c.dist = 0;
+  }
+  // NOT restricted to columns 0/5 (User correction, 2026-07-10): this fiery
+  // no-dissolve overlay can appear on ANY cell(s), not just edge columns.
+  if (hasEdgeNoClearOverlay(img, cx, cy)) {
+    c.edgeNoClear = true;
+    c.thorn = false;
+    // A cell can carry BOTH overlays at once (live-confirmed 2026-07-10:
+    // User reported (0,0)/(0,3)/(5,2) as Wood-locked-ring cells that also
+    // show the fire texture; direct pixel comparison confirmed a green
+    // ring/cross visible through the flame gaps, absent on a genuinely
+    // fire-only cell). When noSolvable already fired, its type is a
+    // reliable STAGE-WIDE CONSTANT (P22) — don't let classifyEdgeHazardBase
+    // clobber it, especially since EDGE_HAZARD_SIGNATURES has no Wood entry
+    // at all, so a Wood+fire cell would always misclassify as whichever of
+    // Fire/Light/Dark/Heart is nearest (observed: Light).
+    // hasNoSolvableOverlay itself MISSES this case (the flame dilutes its
+    // wide-area green-percentage below its own 0.18 threshold — measured
+    // ~0.012 on the 3 confirmed dual cells) — hasGreenTintUnderFire is a
+    // lower-threshold secondary check for exactly this combination.
+    if (!c.noSolvable && !c.frozen && hasGreenTintUnderFire(img, cx, cy)) {
+      c.type = noSolvableType;
+      c.noSolvable = true;
+      c.dist = 0;
+    }
+    if (!c.noSolvable) {
+      // The flame overlay dominates the whole-cell patch average (classify()
+      // above is unreliable here) but the true base color reliably peeks
+      // through the gap between the two flame blobs (live-confirmed
+      // 2026-07-10: Fire/Heart/Dark/Light all showed their own tint through
+      // that gap) — classifyEdgeHazardBase samples that narrow band instead.
+      const edgeBase = classifyEdgeHazardBase(img, cx, cy);
+      c.type = edgeBase.type; c.dist = edgeBase.dist; c.rgb = edgeBase.rgb;
+    }
+  }
+  return c;
+}
+
 function readBoardFromScreen() {
   const img = captureRaw();
+  const noSolvableType = noSolvableTypeOverride();
   const cells = [];
   let anyCandidate = false;
   for (let gy = 0; gy < 5; gy++) {
     const row = [];
     for (let gx = 0; gx < 6; gx++) {
-      const c = classify(cellStats(img, COLS[gx], ROWS[gy]));
+      const c = classifyBoardCell(img, gx, gy, noSolvableType);
       if (c.electric) anyCandidate = true;
       row.push(c);
     }
@@ -346,13 +706,21 @@ function readBoardFromScreen() {
           else c.type = base;
           cells[gy][gx] = c;
         } else {
-          // not electric: classify from the least-white frame to dodge flares.
+          // not electric: classify from the least-white FRAME to dodge flares
+          // (bug found live 2026-07-10, L32: this used to classify() the
+          // stats directly, discarding the go-overlay/no-solvable/edge-hazard
+          // layers for EVERY non-electric cell on the board the moment ANY
+          // cell anywhere looked like a candidate — now routed through the
+          // same classifyBoardCell() as the first pass, on the chosen frame).
           // skipGlow=true so a bright glow-candidate that failed the flicker
           // test is matched to its real signature (enhanced Heart -> Heart),
           // not returned as the type:0 electric placeholder (L18).
-          const s = statsPerFrame.reduce((a, b) =>
-            Math.min(a.rgb[1], a.rgb[2]) <= Math.min(b.rgb[1], b.rgb[2]) ? a : b);
-          const c = classify(s, true);
+          let bestIdx = 0, bestVal = Infinity;
+          for (let k = 0; k < statsPerFrame.length; k++) {
+            const v = Math.min(statsPerFrame[k].rgb[1], statsPerFrame[k].rgb[2]);
+            if (v < bestVal) { bestVal = v; bestIdx = k; }
+          }
+          const c = classifyBoardCell(imgs[bestIdx], gx, gy, noSolvableType, true);
           c.electric = false; // transient flare suppressed
           cells[gy][gx] = c;
         }
@@ -376,7 +744,7 @@ async function waitForStableBoard(timeoutMs = 30000, allowUnknownShocks = false)
     // With a --shock-bases override pending, a bright shock whose base can't
     // be read is NOT a blocker — the override supplies it after settle.
     const allKnown = cells.every(row => row.every(c =>
-      c.dist <= MAX_SIG_DIST || (allowUnknownShocks && c.electric && c.unknownBase)));
+      !cellUnknown(c) || (allowUnknownShocks && c.electric && c.unknownBase)));
     if (allKnown) {
       const key = cells.map(r => r.map(cellLabel).join(',')).join('|');
       if (key === prevKey) return cells;
@@ -394,7 +762,7 @@ async function waitForStableBoard(timeoutMs = 30000, allowUnknownShocks = false)
     });
     const unk = [];
     last.forEach((row, gy) => row.forEach((c, gx) => {
-      if (c.dist > MAX_SIG_DIST) unk.push(`(${gx},${gy})d=${c.dist.toFixed(0)}rgb=(${c.rgb})dark=${Math.round(c.darkPct * 100)}%`);
+      if (cellUnknown(c)) unk.push(`(${gx},${gy})d=${distStr(c)}rgb=(${c.rgb})dark=${Math.round(c.darkPct * 100)}%`);
     }));
     if (unk.length) console.log('[TOS] SETTLE_UNKNOWN=' + unk.join(';'));
   }
@@ -411,19 +779,20 @@ function readBoardFromFile(file) {
     const tokens = line.split(/[\s,]+/).filter(Boolean);
     if (tokens.length !== 6) throw new Error(`row ${gy} needs 6 cells, got ${tokens.length}`);
     return tokens.map((tok, gx) => {
-      let core = tok.toLowerCase(), thorn = false, electric = false, frozen = false, flags = 0;
-      while (/[*!x^#]$/.test(core)) {
+      let core = tok.toLowerCase(), thorn = false, electric = false, iced = false, frozen = false, flags = 0;
+      while (/[*!x^~#]$/.test(core)) {
         const s = core.slice(-1);
         if (s === '*') thorn = true;
         if (s === '!') flags |= CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
         if (s === 'x') flags |= CELL_FLAGS.NO_DISSOLVE;
         if (s === '^') electric = true;
+        if (s === '~') iced = true;
         if (s === '#') frozen = true; // flags added in main(), same as electric
         core = core.slice(0, -1);
       }
       const type = /^[0-5]$/.test(core) ? Number(core) : TYPE_LETTERS.indexOf(core);
       if (type === -1) throw new Error(`bad token "${tok}" at (${gx},${gy})`);
-      return { type, thorn, electric, frozen, flags, dist: 0, rgb: null, darkPct: null };
+      return { type, thorn, electric, iced, frozen, flags, dist: 0, rgb: null, darkPct: null };
     });
   });
 }
@@ -443,14 +812,22 @@ function inferSealedColumns(cells) {
 
 /**
  * Grid path -> screen points. The held rune TRAILS the finger; at speed it
- * cuts corners diagonally through cells the finger never visits — through a
- * shock cell that's an instant interrupt (P11). So dwell (hold position) at
- * every turn, and longer when the cell neighbors a shock, letting the
- * trailing rune settle into the cell before the direction changes.
+ * cuts corners diagonally through cells the finger never visits. So dwell
+ * (hold position) at every turn, and longer when the cell neighbors a cell
+ * in `dwellCells`, letting the trailing rune settle before direction
+ * changes. Two distinct reasons feed the same cell list (P11/P22): an
+ * electric cell forbids touching it at all — cutting a corner through it is
+ * an instant interrupt; a fire-hazard cell allows touching/dragging through
+ * freely, but a corner-cut swap can still drift the ACTUAL final rune
+ * arrangement away from the verified-safe PLANNED one (User-reported live
+ * 2026-07-10: a hazard cell's rune dissolved on a real spin even though the
+ * planned path was independently confirmed to never dissolve it — see P22).
+ * The dwell MECHANISM (settle before turning) fixes both; only the reason
+ * differs, so callers just pass the union of both cell sets.
  */
-function gridPathToScreenPath(gridPath, stepsPerCell = STEPS_PER_CELL, electricCells = []) {
+function gridPathToScreenPath(gridPath, stepsPerCell = STEPS_PER_CELL, dwellCells = []) {
   const centers = gridPath.map(p => ({ x: COLS[p.x], y: ROWS[p.y] }));
-  const nearElectric = p => electricCells.some(e => Math.abs(e.x - p.x) + Math.abs(e.y - p.y) === 1);
+  const nearDwellCell = p => dwellCells.some(e => Math.abs(e.x - p.x) + Math.abs(e.y - p.y) === 1);
   const out = [];
   for (let i = 0; i < centers.length - 1; i++) {
     let dwell = 0;
@@ -458,7 +835,7 @@ function gridPathToScreenPath(gridPath, stepsPerCell = STEPS_PER_CELL, electricC
       const turned = (centers[i].x - centers[i - 1].x) !== (centers[i + 1].x - centers[i].x)
         || (centers[i].y - centers[i - 1].y) !== (centers[i + 1].y - centers[i].y);
       if (turned) dwell = 4;
-      if (nearElectric(gridPath[i])) dwell = Math.max(dwell, 8);
+      if (nearDwellCell(gridPath[i])) dwell = Math.max(dwell, 8);
     }
     for (let k = 0; k < dwell; k++) out.push({ x: centers[i].x, y: centers[i].y });
     for (let j = 0; j < stepsPerCell; j++) {
@@ -470,6 +847,24 @@ function gridPathToScreenPath(gridPath, stepsPerCell = STEPS_PER_CELL, electricC
     }
   }
   out.push(centers[centers.length - 1]);
+  return out;
+}
+
+/**
+ * --drag-from: touch-down on card `cardIdx` (0-indexed) and interpolate up
+ * to the board's (cardIdx, 0) cell center — ONE continuous drag, no lift.
+ * Does NOT include the final (cardIdx,0) point: the solved path's own first
+ * point is exactly that cell (enforced by forcing startCells to it), so the
+ * caller concatenates this prefix directly before gridPathToScreenPath's
+ * output with no duplicate/gap.
+ */
+function cardDragPrefix(cardIdx, stepsPerCell = STEPS_PER_CELL) {
+  const startY = CARD_TOUCH_Y, endY = ROWS[0], x = COLS[cardIdx];
+  const steps = Math.max(1, Math.round(stepsPerCell * Math.abs(endY - startY) / 180));
+  const out = [];
+  for (let j = 0; j < steps; j++) {
+    out.push({ x, y: Math.round(startY + (endY - startY) * (j / steps)) });
+  }
   return out;
 }
 
@@ -540,11 +935,11 @@ function writeCheckHtml(cells, sealedCols, outFile) {
   for (let gy = 0; gy < 5; gy++) {
     for (let gx = 0; gx < 6; gx++) {
       const c = cells[gy][gx];
-      const suspect = c.dist > MAX_SIG_DIST;
+      const suspect = cellUnknown(c);
       const left = (COLS[gx] - 90) * SCALE, top = (ROWS[gy] - 90) * SCALE, size = 180 * SCALE;
       overlays += `<div class="cell${suspect ? ' suspect' : ''}" style="left:${left}px;top:${top}px;width:${size}px;height:${size}px;border-color:${TYPE_CSS[c.type]}">` +
-        `<span style="background:${TYPE_CSS[c.type]}">${TYPE_NAMES[c.type]}${c.electric ? '^' : ''}${c.frozen ? '#' : ''}${c.thorn ? '*' : ''}</span>` +
-        `<small>d=${c.dist.toFixed(0)}</small></div>`;
+        `<span style="background:${TYPE_CSS[c.type]}">${TYPE_NAMES[c.type]}${c.electric ? '^' : ''}${c.iced ? '~' : ''}${c.frozen ? '#' : ''}${c.noSolvable ? '%' : ''}${c.edgeNoClear ? '$' : ''}${c.thorn ? '*' : ''}${c.go ? '@' : ''}</span>` +
+        `<small>d=${distStr(c)}</small></div>`;
     }
   }
   const html = `<!doctype html><meta charset="utf-8"><title>TOS recognition check</title>
@@ -591,6 +986,19 @@ function argCell(flag) {
   return { x: parts[0], y: parts[1] };
 }
 
+function parseRuneTypeList(flag) {
+  const raw = argValue(flag);
+  if (!raw) return [];
+  return [...new Set(String(raw).split(',').filter(Boolean).map(s => {
+    const tok = s.trim().toLowerCase();
+    const t = /^[0-5]$/.test(tok) ? Number(tok)
+      : TYPE_LETTERS.indexOf(tok) !== -1 ? TYPE_LETTERS.indexOf(tok)
+      : TYPE_NAMES.map(n => n.toLowerCase()).indexOf(tok);
+    if (t === -1) throw new Error(`${flag}: unknown rune type "${s.trim()}" (use ${TYPE_NAMES.join('/')}, ${TYPE_LETTERS.join('/')}, or 0-5)`);
+    return t;
+  }))];
+}
+
 function askEnter(msg) {
   return new Promise(resolve => {
     const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
@@ -626,7 +1034,6 @@ async function main() {
     if (rounds > 1) console.log(`[TOS] ROUND=${round}/${rounds}`);
 
     const cells = boardFile ? readBoardFromFile(boardFile)
-      : (checkOnly || dry) ? readBoardFromScreen()
       : await waitForStableBoard(30000, !!argValue('--shock-bases'));
 
     // --shock-bases override: bright shocks (esp. Light) defeat pixel base
@@ -649,7 +1056,7 @@ async function main() {
 
     const unknowns = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => {
-      if (c.dist > MAX_SIG_DIST) unknowns.push(`(${gx},${gy})d=${c.dist.toFixed(0)}rgb=(${c.rgb})dark=${Math.round(c.darkPct * 100)}%`);
+      if (cellUnknown(c)) unknowns.push(`(${gx},${gy})d=${distStr(c)}rgb=(${c.rgb})dark=${Math.round(c.darkPct * 100)}%`);
     }));
     cells.forEach((row, gy) => {
       console.log('[TOS] BOARD_ROW' + gy + '=' + row.map(cellLabel).join(','));
@@ -657,6 +1064,35 @@ async function main() {
     const elecList = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.electric) elecList.push(`${gx},${gy}`); }));
     if (elecList.length) console.log('[TOS] ELECTRIC_CELLS=' + elecList.join(' ') + ' (row-major; --shock-bases maps in this order)');
+    const goCells = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.go) goCells.push({ x: gx, y: gy }); }));
+    if (goCells.length) console.log('[TOS] GO_CELLS=' + goCells.map(c => `${c.x},${c.y}`).join(' ') + ' (forced drag start unless --start/--drag-from overrides)');
+    const edgeNoClearCells = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.edgeNoClear) edgeNoClearCells.push(`${gx},${gy}`); }));
+    if (edgeNoClearCells.length) console.log('[TOS] EDGE_NO_CLEAR_CELLS=' + edgeNoClearCells.join(' ') + ' (positional hazard: treated as NO_DISSOLVE)');
+    // {x,y} form for the drag-execution dwell logic below (User-reported live
+    // 2026-07-10: a hazard cell's rune dissolved during an actual spin even
+    // though the PLANNED path was verified safe — BoardSimulator never marks
+    // a NO_DISSOLVE cell into any group. Touching/dragging THROUGH a hazard
+    // cell is completely fine (User-clarified: unlike an electric shock cell,
+    // where touching itself is forbidden); the risk is purely EXECUTION
+    // FIDELITY — the held rune TRAILS the finger and can cut corners at
+    // speed (P11), so the ACTUAL swap sequence the device performs can
+    // diverge from the verified-safe PLANNED sequence, landing a different
+    // rune arrangement than intended near the hazard cell. Extra dwell at
+    // turns near a hazard cell reduces that drift, the same way it already
+    // does near an electric cell — the MECHANISM is identical (settle the
+    // trailing rune before changing direction), only the REASON differs
+    // (there: touching is forbidden; here: an off-plan swap risks an
+    // accidental match).
+    const hazardDwellCells = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.edgeNoClear || c.noSolvable) hazardDwellCells.push({ x: gx, y: gy }); }));
+    const detectedNoSolvableTypes = [...new Set(cells.flat().filter(c => c.noSolvable).map(c => c.type))];
+    let noSolvableTypes = [...new Set([...parseRuneTypeList('--no-solvable'), ...detectedNoSolvableTypes])];
+    if (detectedNoSolvableTypes.length > 0) {
+      console.log('[TOS] NO_SOLVABLE_MARKERS=' + detectedNoSolvableTypes.map(t => TYPE_NAMES[t]).join(',')
+        + ' (detected from board no-symbol overlay)');
+    }
 
     const sealedArg = argValue('--sealed');
     const sealedCols = sealedArg === 'none' ? []
@@ -684,6 +1120,33 @@ async function main() {
     // Frozen runes go onto the solver board as the per-rune FROZEN value: they
     // drag/swap/fall like any rune (ice travels with them) but never match.
     board.fromArray(cells.map(row => row.map(c => (c.frozen ? FROZEN : c.type))));
+
+    // --drag-from N (1-indexed card, 1-6): the drag PHYSICALLY starts by
+    // touching card N and dragging it into the board — that action drops a
+    // rune of the card's element at (N-1, 0), displacing whatever was read
+    // there, before any solving happens. One continuous drag (card -> board
+    // -> solved path), so the solve is also forced to START at (N-1, 0).
+    const dragFromArg = argValue('--drag-from');
+    let dragFromCol = null;
+    if (dragFromArg !== null) {
+      const cardNum = Number(dragFromArg);
+      if (!Number.isInteger(cardNum) || cardNum < 1 || cardNum > 6) {
+        throw new Error(`--drag-from must be a card number 1-6 (got "${dragFromArg}")`);
+      }
+      dragFromCol = cardNum - 1;
+      const cardImg = captureRaw();
+      const badge = readCardBadge(cardImg, dragFromCol);
+      if (badge.dist > MAX_CARD_SIG_DIST) {
+        console.log(`[TOS] ABORT=drag-from-unknown card=${cardNum} rgb=(${badge.rgb}) dist=${badge.dist.toFixed(0)}`
+          + ' — no calibrated CARD_SIGNATURES entry within threshold (add one for this element/brightness; no touch sent)');
+        return;
+      }
+      const prevLabel = cellLabel(cells[0][dragFromCol]);
+      console.log(`[TOS] DRAG_FROM=card${cardNum} type=${TYPE_NAMES[badge.type]} rgb=(${badge.rgb}) dist=${badge.dist.toFixed(0)}`);
+      console.log(`[TOS] DRAG_FROM_OVERWRITE=(${dragFromCol},0) ${prevLabel} -> ${TYPE_NAMES[badge.type]} (existing rune displaced)`);
+      board.set(dragFromCol, 0, badge.type);
+    }
+
     // Electric runes (P11): cannot be picked up or dragged through (interrupt
     // the spin) but DO dissolve with their base element — and clearing them is
     // top priority (they block attacking until dissolved).
@@ -692,6 +1155,11 @@ async function main() {
       let f = c.flags ?? 0;
       if (c.electric) {
         f |= CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
+      }
+      if (c.edgeNoClear) {
+        f |= CELL_FLAGS.NO_DISSOLVE;
+      }
+      if (c.electric || c.iced) {
         priorityCells.push({ x: gx, y: gy });
       }
       return f;
@@ -702,14 +1170,32 @@ async function main() {
     const frozenList = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.frozen) frozenList.push(`${gx},${gy}`); }));
     if (frozenList.length) console.log('[TOS] FROZEN_CELLS=' + frozenList.join(' ') + ' (draggable/pass-through, never dissolve; ice travels with the rune)');
+    const icedList = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.iced) icedList.push(`${gx},${gy}`); }));
+    if (icedList.length) console.log('[TOS] ICED_CELLS=' + icedList.join(' ') + ' (dissolvable this round; first-wave priority before they freeze)');
     const hasFlags = flagGrid.some(row => row.some(v => v !== 0));
     if (hasFlags) console.log('[TOS] CELL_FLAGS_ROWS=' + flagGrid.map(r => r.join('')).join('|'));
 
     // --start / --end pin the drag's begin/end cell (col,row). Orthogonal to
     // every other knob (sealed columns, first-combos/-runes, priority) — they
     // just restrict the beam's seed cells and which states may be the answer.
-    const startCell = argCell('--start');
+    // --drag-from FORCES start to (dragFromCol, 0): the physical drag enters
+    // the board there, so the solve must begin there too — it overrides any
+    // --start value given (they'd conflict with the one continuous motion).
+    let startCell = argCell('--start');
     const endCell = argCell('--end');
+    if (dragFromCol === null && startCell === null && goCells.length > 0) {
+      startCell = goCells[0];
+      if (goCells.length > 1) console.log('[TOS] GO_START=multiple detected; using first row-major ' + `${startCell.x},${startCell.y}`);
+      else console.log('[TOS] GO_START=' + `${startCell.x},${startCell.y}`);
+    }
+    if (dragFromCol !== null) {
+      if (startCell && (startCell.x !== dragFromCol || startCell.y !== 0)) {
+        console.log(`[TOS] DRAG_FROM_OVERRIDE=start forced to ${dragFromCol},0 (was --start ${startCell.x},${startCell.y}` +
+          ' — --drag-from\'s physical motion enters the board at its own card column, overriding --start)');
+      }
+      startCell = { x: dragFromCol, y: 0 };
+    }
     if (startCell && (flagGrid[startCell.y][startCell.x] & (CELL_FLAGS.NO_PICKUP))) {
       console.log(`[TOS] ABORT=start-unpickable start=${startCell.x},${startCell.y} is electric/locked (NO_PICKUP) — the game can't lift it; pick another --start (no touch sent)`);
       return;
@@ -731,17 +1217,22 @@ async function main() {
     // --2-match=h,f : rune types that dissolve at a run of TWO instead of three
     // (boss mechanic). A 2-run of such a type counts as a full combo everywhere
     // (scoring, first-wave counts, clear-all). Everything else still needs 3.
-    const twoMatchArg = argValue('--2-match');
-    const twoMatch = twoMatchArg ? [...new Set(twoMatchArg.split(',').filter(Boolean).map(s => {
-      const tok = s.trim().toLowerCase();
-      const t = /^[0-5]$/.test(tok) ? Number(tok)
-        : TYPE_LETTERS.indexOf(tok) !== -1 ? TYPE_LETTERS.indexOf(tok)
-        : TYPE_NAMES.map(n => n.toLowerCase()).indexOf(tok);
-      if (t === -1) throw new Error(`--2-match: unknown rune type "${s.trim()}" (use ${TYPE_NAMES.join('/')}, ${TYPE_LETTERS.join('/')}, or 0-5)`);
-      return t;
-    }))] : null;
+    const twoMatchParsed = parseRuneTypeList('--2-match');
+    const twoMatch = twoMatchParsed.length ? twoMatchParsed : null;
     const isTwoMatch = t => twoMatch !== null && twoMatch.includes(t);
     if (twoMatch) console.log(`[TOS] TWO_MATCH=${twoMatch.map(t => TYPE_NAMES[t]).join(',')} (dissolve at a run of 2)`);
+    // --no-solvable=f,g : listed rune types never dissolve at all, even if
+    // aligned in a run of 3+ (and even if also named in --2-match).
+    if (noSolvableTypes.length > 0) {
+      const twoConflict = noSolvableTypes.filter(t => isTwoMatch(t));
+      if (twoConflict.length > 0) {
+        console.log('[TOS] ABORT=no-solvable-conflict ' + twoConflict.map(t => TYPE_NAMES[t]).join(',')
+          + ' cannot be both --2-match and --no-solvable (no touch sent)');
+        return;
+      }
+      console.log('[TOS] NO_SOLVABLE=' + noSolvableTypes.map(t => TYPE_NAMES[t]).join(',')
+        + ' (never dissolves, including cascades)');
+    }
     // --first-combos N = EXACTLY N; --first-combos N+ = at least N;
     // --first-combos max = highest achievable. --first-min-combos N stays
     // as a backward-compatible alias for N+.
@@ -755,21 +1246,32 @@ async function main() {
     const rawRunes = argValue('--first-runes');
     const exactRunesMode = rawRunes !== null && !String(rawRunes).endsWith('+');
     const minFirstRunes = Number(String(rawRunes ?? 0).replace(/\+$/, ''));
+    // --first-wave-no TYPES: listed types may not dissolve in wave 1. They
+    // may still match after gravity/cascades.
+    const firstWaveNoTypes = parseRuneTypeList('--first-wave-no');
+    if (firstWaveNoTypes.length > 0) {
+      console.log('[TOS] FIRST_WAVE_NO=' + firstWaveNoTypes.map(t => TYPE_NAMES[t]).join(',')
+        + ' (forbidden only in wave 1; cascades after gravity are allowed)');
+    }
     // --clear-all TYPES: the first wave must dissolve EVERY rune of each
     // listed type. Accepts full names / letters / digits, comma-separated
     // (e.g. "heart", "h,w", "5,0"). STRICT semantics: the required count is
     // the type's total count on the board, so runes sitting in thorn/sealed
     // columns or NO_DISSOLVE cells must be dragged OUT and dissolved —
     // parking a required rune into a sealed column never satisfies the boss.
-    const clearArg = argValue('--clear-all');
-    const clearTypes = [...new Set((clearArg ?? '').split(',').filter(Boolean).map(s => {
-      const tok = s.trim().toLowerCase();
-      const t = /^[0-5]$/.test(tok) ? Number(tok)
-        : TYPE_LETTERS.indexOf(tok) !== -1 ? TYPE_LETTERS.indexOf(tok)
-        : TYPE_NAMES.map(n => n.toLowerCase()).indexOf(tok);
-      if (t === -1) throw new Error(`--clear-all: unknown rune type "${s.trim()}" (use ${TYPE_NAMES.join('/')}, ${TYPE_LETTERS.join('/')}, or 0-5)`);
-      return t;
-    }))];
+    const clearTypes = parseRuneTypeList('--clear-all');
+    const impossibleBoth = clearTypes.filter(t => firstWaveNoTypes.includes(t));
+    if (impossibleBoth.length > 0) {
+      console.log('[TOS] ABORT=first-wave-no-conflict ' + impossibleBoth.map(t => TYPE_NAMES[t]).join(',')
+        + ' cannot be both --clear-all and --first-wave-no in wave 1 (no touch sent)');
+      return;
+    }
+    const noSolveClear = clearTypes.filter(t => noSolvableTypes.includes(t));
+    if (noSolveClear.length > 0) {
+      console.log('[TOS] ABORT=no-solvable-conflict ' + noSolveClear.map(t => TYPE_NAMES[t]).join(',')
+        + ' cannot be both --clear-all and --no-solvable (no touch sent)');
+      return;
+    }
     if (clearTypes.length > 0) {
       // Exclude frozen cells: their .type is a display placeholder — on the
       // solver board they are FROZEN and can never dissolve, so they are not
@@ -811,22 +1313,23 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstRunes, exactFirstRunes: exactRunesMode,
-        startCells, endCell, fireRoute, twoMatch, clearTypes,
+        startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
       }, workers);
       engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
     } else if (maxMode) {
       // Find the highest achievable first-wave count (bound -> planner -> baseline).
-      // plannerBeamWidth capped like the clear-all escalation below: the
-      // router's objective is dense (L22 routed reliably at beam 300), so
-      // inheriting --beam 16000 here just makes each failed descent step
-      // (n=bound, bound-1, ...) cost tens of seconds for nothing.
+      // plannerBeamWidth is a CEILING, not a fixed width: solveClearAllParallel
+      // escalates internally (300 -> 2000 -> 8000 -> ... up to this ceiling),
+      // so passing the full --beam here is safe and correct — a hard dual
+      // start+end pin can genuinely need beam 8000+ to route at all (a fixed
+      // cap of 2000 silently MISSed a solvable 5/5 case, L25-adjacent bug).
       const res = await solveMaxFirstCombosParallel(board, {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, priorityCells,
         beamWidth: Number(argValue('--beam') ?? 200),
         maxPath: Number(argValue('--max-path') ?? 30),
-        plannerBeamWidth: Math.min(Math.max(300, Number(argValue('--beam') ?? 0)), 2000),
+        plannerBeamWidth: Math.max(300, Number(argValue('--beam') ?? 0)),
         plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
-        startCells, endCell, fireRoute, twoMatch, clearTypes,
+        startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
       }, workers);
       sol = res.solution;
       engine = `MaxFirstCombos(achieved=${res.achieved}/bound=${res.bound})`;
@@ -837,7 +1340,7 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
-        startCells, endCell, fireRoute, twoMatch, clearTypes,
+        startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
       }, workers);
       engine = 'DoraSolver';
     }
@@ -848,25 +1351,32 @@ async function main() {
     // constructive coverage planner (which CAN, unlike a wider beam).
     const clearAllMissed = () => {
       if (clearTypes.length === 0) return false;
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch });
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
       const totalsByType = t => board.grid.reduce((n, row) => n + row.filter(v => v === t).length, 0);
       return clearTypes.some(t => sim.firstClearedByType[t] < totalsByType(t));
+    };
+    const firstWaveNoMissed = () => {
+      if (firstWaveNoTypes.length === 0) return false;
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
+      return firstWaveNoTypes.some(t => sim.firstClearedByType[t] > 0);
     };
 
     // Guarantee escalation: if beam search misses the first-combo target OR a
     // clear-all demand, the planner constructs it (or proves it impossible).
-    if (!maxMode && minFirstRunes === 0 && ((minFirstArg > 0 && missesTarget()) || clearAllMissed())) {
-      // The router's objective is DENSE (cells-matched + distance potential),
-      // so it doesn't need DoraSolver-scale beams: L22 routed 8/8 end-pinned
-      // placements at beam 300. Inheriting --beam 16000 here made a failed
-      // escalation cost 35-60s; capped, a MISS costs a few seconds instead.
-      const plannerBeam = Math.min(Math.max(300, Number(argValue('--beam') ?? 0)), 2000);
+    if (!maxMode && minFirstRunes === 0 && ((minFirstArg > 0 && missesTarget()) || clearAllMissed() || firstWaveNoMissed())) {
+      // plannerBeam is a CEILING: solveClearAllParallel escalates internally
+      // (300 -> 2000 -> 8000 -> ... up to this value), so it stays fast on
+      // easy/no-pin cases (L22: routes at 300) while still succeeding on a
+      // hard dual start+end pin that needs far more width to route at all
+      // (measured live: 2000/4000 routing-failed, 8000 succeeded on a
+      // solvable 5/5 case — a flat 2000 cap silently MISSed it).
+      const plannerBeam = Math.max(300, Number(argValue('--beam') ?? 0));
       const plannerMaxPath = Math.max(60, Number(argValue('--max-path') ?? 0));
       const plannerOpts = {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
         minFirstCombos: minFirstArg, exact: exactMode,
         beamWidth: plannerBeam, maxPath: plannerMaxPath,
-        startCells, endCell, fireRoute, twoMatch, clearTypes,
+        startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
       };
       // Clear-all coverage targets are independent routing problems — shard
       // them across the same worker pool; the combo-target planner path
@@ -879,7 +1389,7 @@ async function main() {
         engine = clearTypes.length ? `TargetPlanner(clear-all,combos=${planned.solution.comboCount})` : `TargetPlanner(target#${planned.targetsTried})`;
       } else {
         console.log('[TOS] PLANNER=failed reason=' + planned.reason + (planned.reason === 'routing-failed'
-          ? ` (targets exist; tried beam=${plannerBeam} maxPath=${plannerMaxPath} targets=${planned.targetsTried}; retry with --beam ${plannerBeam * 2} and/or --max-path ${plannerMaxPath + 30})`
+          ? ` (targets exist; escalated routing up to beam=${plannerBeam} maxPath=${plannerMaxPath} (${planned.targetsTried} target-attempts total); retry with --beam ${plannerBeam * 2} and/or --max-path ${plannerMaxPath + 30})`
           : ' (demand provably impossible on this board)'));
       }
     }
@@ -907,7 +1417,7 @@ async function main() {
     // board's counts); "trapped" = required runes the drag LEFT in sealed /
     // no-dissolve cells, which is why the demand failed there.
     if (clearTypes.length > 0) {
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch });
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
       const detail = [], unmet = [];
       for (const t of clearTypes) {
         let total = 0, trapped = 0;
@@ -925,6 +1435,34 @@ async function main() {
       console.log('[TOS] CLEAR_ALL=' + detail.join(',') + (unmet.length ? ' MISS' : ' ok'));
       if (unmet.length > 0) {
         console.log(`[TOS] ABORT=clear-all ${unmet.join('; ')} (no touch sent; DoraSolver AND the coverage planner both fell short. Retry with a wider --beam and/or --max-path 90; if a required rune is stuck in a sealed/no-dissolve cell it may be impossible.)`);
+        return;
+      }
+    }
+
+    if (firstWaveNoTypes.length > 0) {
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
+      const hit = firstWaveNoTypes
+        .map(t => ({ t, n: sim.firstClearedByType[t] }))
+        .filter(o => o.n > 0);
+      console.log('[TOS] FIRST_WAVE_NO_RESULT=' + firstWaveNoTypes.map(t => `${TYPE_NAMES[t]}:${sim.firstClearedByType[t]}`).join(',')
+        + (hit.length ? ' MISS' : ' ok'));
+      if (hit.length > 0) {
+        console.log('[TOS] ABORT=first-wave-no ' + hit.map(o => `${TYPE_NAMES[o.t]}=${o.n}`).join(',')
+          + ' dissolved in wave 1 (no touch sent; try a wider --beam and/or --max-path)');
+        return;
+      }
+    }
+
+    if (noSolvableTypes.length > 0) {
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
+      const cleared = Array(6).fill(0);
+      for (const g of sim.groups) cleared[g.type] += g.cells.length;
+      const hit = noSolvableTypes.map(t => ({ t, n: cleared[t] })).filter(o => o.n > 0);
+      console.log('[TOS] NO_SOLVABLE_RESULT=' + noSolvableTypes.map(t => `${TYPE_NAMES[t]}:${cleared[t]}`).join(',')
+        + (hit.length ? ' MISS' : ' ok'));
+      if (hit.length > 0) {
+        console.log('[TOS] ABORT=no-solvable ' + hit.map(o => `${TYPE_NAMES[o.t]}=${o.n}`).join(',')
+          + ' dissolved despite --no-solvable (no touch sent)');
         return;
       }
     }
@@ -962,7 +1500,16 @@ async function main() {
     // per touch-point time (× steps-per-cell = per move). --move-ms wins.
     const moveMsArg = argValue('--move-ms');
     const stepMs = moveMsArg != null ? Number(moveMsArg) / stepsPerCell : Number(argValue('--step-ms') ?? STEP_MS);
-    const screenPath = gridPathToScreenPath(sol.path, stepsPerCell, priorityCells);
+    // --drag-from: prepend the card-to-board segment so the WHOLE motion
+    // (card -> board -> solved path) is one continuous drag, no lift.
+    // Extra turn-dwell applies near electric cells (touching is forbidden)
+    // AND hazard cells (touching is fine; dwell here is purely to keep the
+    // ACTUAL swap sequence matching the verified-safe planned one, per the
+    // hazardDwellCells comment above).
+    const dwellCells = [...priorityCells, ...hazardDwellCells];
+    const screenPath = dragFromCol !== null
+      ? [...cardDragPrefix(dragFromCol, stepsPerCell), ...gridPathToScreenPath(sol.path, stepsPerCell, dwellCells)]
+      : gridPathToScreenPath(sol.path, stepsPerCell, dwellCells);
     const dragMs = await executeTouchPath(screenPath, stepMs);
     console.log(`[TOS] SPIN=done points=${screenPath.length} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} (moveMs excludes corner dwells)`);
 

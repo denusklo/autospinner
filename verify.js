@@ -336,6 +336,57 @@ const ca6 = new DoraSolver(caBoard, {beamWidth: 300, maxPath: 20, clearTypes: [5
 check('C6 start pin honored under clear-all', [ca6.startX, ca6.startY], [1, 2]);
 check('C6 all hearts still cleared wave 1', ca6.firstClearedByType[5], 3);
 
+// --- First-wave NO: listed types may not dissolve in wave 1, but may still
+// dissolve after gravity/cascades ---
+
+const noFG = new DoraSolver(caBoard, {
+  beamWidth: 500, maxPath: 30, minFirstCombos: 1, firstWaveNoTypes: [1, 2],
+}).solve();
+const noFGsim = BoardSimulator.resolve(noFG.board);
+check('N1 first-wave-no forbids Fire/Wood in wave 1',
+  [noFGsim.firstClearedByType[1], noFGsim.firstClearedByType[2]], [0, 0]);
+check('N1 still makes allowed first-wave combo(s)', noFGsim.firstCombos >= 1, true);
+
+const noBound = mk([
+  [1,1,1,2,2,2],
+  [1,1,1,2,2,2],
+  [1,1,1,2,2,2],
+  [1,1,1,2,2,2],
+  [1,1,1,2,2,2],
+]);
+check('N2 max-first-combos bound excludes first-wave-no colors',
+  solveMaxFirstCombos(noBound, {firstWaveNoTypes: [1, 2], beamWidth: 50, maxPath: 8}).bound, 0);
+
+const noPlanner = new TargetPlanner(noBound, {minFirstCombos: 1, firstWaveNoTypes: [1, 2]}).solve();
+check('N3 planner rejects targets using forbidden first-wave colors',
+  noPlanner.reason, 'no-feasible-target');
+
+// --- No-solvable: listed types never dissolve, even when aligned ---
+
+check('NS1 no-solvable blocks aligned Fire/Wood runs',
+  BoardSimulator.resolve(noBound, {noSolvableTypes: [1, 2]}).totalCombos, 0);
+check('NS2 no-solvable overrides 2-match',
+  BoardSimulator.findComboGroups(mk([[5,5,0,1,2,3],[1,2,3,4,0,1],[2,3,4,0,1,2],[3,4,0,1,2,3],[4,0,1,2,3,4]]), [], null, [5], [5]).length, 0);
+
+const nsFG = new DoraSolver(caBoard, {
+  beamWidth: 500, maxPath: 30, minFirstCombos: 1, noSolvableTypes: [1, 2],
+}).solve();
+const nsFGsim = BoardSimulator.resolve(nsFG.board, {noSolvableTypes: [1, 2]});
+check('NS3 solver makes allowed combo(s) under no-solvable', nsFGsim.firstCombos >= 1, true);
+check('NS3 solver never dissolves Fire/Wood',
+  nsFGsim.groups.some(g => g.type === 1 || g.type === 2), false);
+
+check('NS4 max-first-combos bound excludes no-solvable colors',
+  solveMaxFirstCombos(noBound, {noSolvableTypes: [1, 2], beamWidth: 50, maxPath: 8}).bound, 0);
+
+const nsPlanner = new TargetPlanner(noBound, {minFirstCombos: 1, noSolvableTypes: [1, 2]}).solve();
+check('NS5 planner rejects targets using no-solvable colors',
+  nsPlanner.reason, 'no-feasible-target');
+
+const nsClearPlanner = new TargetPlanner(noBound, {clearTypes: [1], noSolvableTypes: [1]}).solve();
+check('NS6 clear-all planner rejects no-solvable clear target',
+  nsClearPlanner.reason, 'no-feasible-target');
+
 // --- Priority cells (electric runes, P11): first-wave clearing rewarded,
 // cell itself untouchable (NO_PICKUP|NO_SWAP) but still dissolvable ---
 

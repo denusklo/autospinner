@@ -47,5 +47,6 @@ Chrome MV3 extension: on the orb-spinning simulator <https://louisalflame.github
 | `LESSONS.md` | Check here first when an error feels familiar |
 | `00-DIAGNOSIS.md` | When you want to understand why this system exists (background, not rules) |
 | `05-HANDOVER-LETTER.md` | Before a new session takes over a large task |
+| `06-RECOGNITION-PROTOCOL.md` | When the User reports a new visual board pattern/overlay needing recognition + solver wiring |
 
 > No CLAUDE.local.md: this is a single-person project with no machine-private settings to isolate; local permissions are managed by `.claude/settings.local.json`. Do not create one.

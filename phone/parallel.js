@@ -56,19 +56,26 @@ function qualifies(sol, options, clearTypeTotals) {
   for (const t of options.clearTypes ?? []) {
     if (sol.firstClearedByType[t] < clearTypeTotals[t]) return false;
   }
+  for (const t of options.firstWaveNoTypes ?? []) {
+    if ((sol.firstClearedByType[t] ?? 0) > 0) return false;
+  }
   return true;
 }
 
 function hasDemands(options) {
   return (options.minFirstCombos ?? 0) > 0 || (options.minFirstRunes ?? 0) > 0
-    || (options.clearTypes ?? []).length > 0;
+    || (options.clearTypes ?? []).length > 0 || (options.firstWaveNoTypes ?? []).length > 0;
 }
 
 // clearTypes is a MANDATORY demand (P14), unlike minFirstCombos/minFirstRunes
 // which are optional targets — mirrors DoraSolver.solve's sc.clearAllOk so a
 // worker's final pick can be classified into the bestClearAllOnly tier when
 // it satisfies clear-all but missed an unreachable combo/rune target.
-function clearAllSatisfied(sol, clearTypes, clearTypeTotals) {
+function hardDemandsSatisfied(sol, options, clearTypeTotals) {
+  for (const t of options.firstWaveNoTypes ?? []) {
+    if ((sol.firstClearedByType[t] ?? 0) > 0) return false;
+  }
+  const clearTypes = options.clearTypes ?? [];
   for (const t of clearTypes ?? []) {
     if (sol.firstClearedByType[t] < clearTypeTotals[t]) return false;
   }
@@ -122,21 +129,21 @@ async function solveDoraParallel(board, options = {}, workers = defaultWorkers()
   let steps = Math.min(3, maxPath - 1);
   let pre = new DoraSolver(board, { ...opts, maxPath: steps, emitFrontier: true }).solve();
   let frontier = pre.frontier;
-  let best = pre.best, bestQualified = pre.bestQualified, bestClearAllOnly = pre.bestClearAllOnly;
+  let best = pre.best, bestQualified = pre.bestQualified, bestHardOnly = pre.bestHardOnly ?? pre.bestClearAllOnly;
   while (frontier.length > 0 && frontier.length < workers * 4 && steps < maxPath - 1) {
     const more = new DoraSolver(board, { ...opts, maxPath: 1, emitFrontier: true, seedBeam: frontier }).solve();
     steps += 1;
     frontier = more.frontier;
     best = mergePick(best, more.best);
     bestQualified = mergePick(bestQualified, more.bestQualified);
-    bestClearAllOnly = mergePick(bestClearAllOnly, more.bestClearAllOnly);
+    bestHardOnly = mergePick(bestHardOnly, more.bestHardOnly ?? more.bestClearAllOnly);
   }
 
   // Same fallback priority as DoraSolver.solve(): a solution meeting every
   // demand, else one still satisfying the MANDATORY clear-all demand (P14),
   // else the fully-unconstrained best.
   const finalize = () => {
-    const pick = bestQualified ?? bestClearAllOnly ?? best;
+    const pick = bestQualified ?? bestHardOnly ?? best;
     if (pick === null) {
       return { startX: 0, startY: 0, path: [{ x: 0, y: 0 }], moves: [], score: 0, comboCount: 0, firstCombos: 0, firstRunes: 0, firstClearedByType: Array(6).fill(0), chains: 0, board: board.clone() };
     }
@@ -173,52 +180,75 @@ async function solveDoraParallel(board, options = {}, workers = defaultWorkers()
     if (!r || r.moves.length === 0) continue;
     const sol = reviveBoard(r);
     if (demands && qualifies(sol, opts, clearTypeTotals)) bestQualified = mergePick(bestQualified, sol);
-    else if ((opts.clearTypes ?? []).length > 0 && clearAllSatisfied(sol, opts.clearTypes, clearTypeTotals)) {
-      bestClearAllOnly = mergePick(bestClearAllOnly, sol);
+    else if (((opts.clearTypes ?? []).length > 0 || (opts.firstWaveNoTypes ?? []).length > 0)
+        && hardDemandsSatisfied(sol, opts, clearTypeTotals)) {
+      bestHardOnly = mergePick(bestHardOnly, sol);
     } else best = mergePick(best, sol);
   }
   return finalize();
 }
 
 /**
- * Parallel TargetPlanner.solveClearAll: plans coverage targets in-process,
- * shards them across workers, merges with the serial tie-break (most total
- * combos, then earliest-planned target). Same {solution, reason,
- * targetsTried} shape as TargetPlanner.solve()/solveClearAll().
+ * Parallel TargetPlanner.solveClearAll: plans coverage targets ONCE (pure
+ * board geometry — planClearAllTargets never depends on beamWidth), then
+ * routes them at an ESCALATING beam width, stopping at the first success.
+ *
+ * Why escalate instead of using a fixed width: L22 showed single/no-pin (or
+ * end-only) clear-all cases route reliably at beam 300. But a HARD dual
+ * start+end pin can need far more width to route at all — measured live
+ * (2026-07-09): 2000 and 4000 both routing-failed, 8000 succeeded, on a case
+ * that is genuinely solvable (5/5 hearts) but was silently reported as a
+ * MISS by an earlier fixed cap of 2000. A flat low cap trades correctness
+ * for speed on hard-but-solvable cases; a flat high cap (inheriting the
+ * caller's full --beam, e.g. 16000+) wastes tens of seconds on cases that
+ * are either easy (would've routed at 300) or truly impossible (routing
+ * width can never fix a structural infeasibility). Escalating gets both:
+ * fast on easy/impossible cases, correct on hard-but-solvable ones.
+ *
+ * `reason: 'no-feasible-target'` (not enough board geometry to even
+ * construct a coverage placement) is beam-INDEPENDENT — checked once,
+ * before any routing attempt, since escalating the beam can never fix it.
+ * Same {solution, reason, targetsTried} shape as
+ * TargetPlanner.solve()/solveClearAll(); targetsTried sums across all
+ * escalation steps actually attempted.
  */
 async function solveClearAllParallel(board, plannerOptions = {}, workers = defaultWorkers()) {
   const opts = plainOptions(plannerOptions);
   const planner = new TargetPlanner(board, opts);
-  if (workers <= 1) return planner.solveClearAll();
   const targets = planner.planClearAllTargets();
   if (targets.length === 0) return { solution: null, reason: 'no-feasible-target', targetsTried: 0 };
-
   const budget = Math.max(planner.maxTargets, 30);
   const capped = targets.slice(0, budget);
-  const K = Math.min(workers, capped.length);
-  const shards = Array.from({ length: K }, () => []);
-  capped.forEach((t, i) => shards[i % K].push({ index: i, target: t }));
 
-  const results = await Promise.all(shards.map(shard => runWorker({
-    mode: 'clear-all',
-    boardGrid: board.grid,
-    options: opts,
-    targets: shard,
-  })));
+  const ceiling = opts.beamWidth ?? 300;
+  const steps = [...new Set([300, 2000, 8000, 20000].filter(b => b < ceiling)), ceiling];
 
-  let best = null, bestCombos = -1, bestIndex = Infinity, tried = 0;
-  for (const r of results) {
-    tried += r.tried;
-    if (!r.solution) continue;
-    if (r.solution.comboCount > bestCombos
-        || (r.solution.comboCount === bestCombos && r.index < bestIndex)) {
-      best = reviveBoard(r.solution);
-      bestCombos = r.solution.comboCount;
-      bestIndex = r.index;
+  let tried = 0;
+  for (const beam of steps) {
+    const stepOpts = { ...opts, beamWidth: beam };
+    if (workers <= 1) {
+      const res = new TargetPlanner(board, stepOpts).solveClearAll(capped);
+      tried += res.targetsTried;
+      if (res.solution) return { solution: res.solution, reason: 'ok', targetsTried: tried };
+      continue;
     }
+    const K = Math.min(workers, capped.length);
+    const shards = Array.from({ length: K }, () => []);
+    capped.forEach((t, i) => shards[i % K].push({ index: i, target: t }));
+    const results = await Promise.all(shards.map(shard => runWorker({
+      mode: 'clear-all', boardGrid: board.grid, options: stepOpts, targets: shard,
+    })));
+    let best = null, bestCombos = -1, bestIndex = Infinity;
+    for (const r of results) {
+      tried += r.tried;
+      if (!r.solution) continue;
+      if (r.solution.comboCount > bestCombos || (r.solution.comboCount === bestCombos && r.index < bestIndex)) {
+        best = reviveBoard(r.solution); bestCombos = r.solution.comboCount; bestIndex = r.index;
+      }
+    }
+    if (best) return { solution: best, reason: 'ok', targetsTried: tried };
   }
-  return best ? { solution: best, reason: 'ok', targetsTried: tried }
-              : { solution: null, reason: 'routing-failed', targetsTried: tried };
+  return { solution: null, reason: 'routing-failed', targetsTried: tried };
 }
 
 /**
@@ -243,12 +273,14 @@ async function solveMaxFirstCombosParallel(board, options = {}, workers = defaul
   const fireRoute = opts.fireRoute ?? 0;
   const twoMatch = opts.twoMatch ?? null;
   const clearTypes = opts.clearTypes ?? [];
+  const firstWaveNoTypes = opts.firstWaveNoTypes ?? [];
+  const noSolvableTypes = opts.noSolvableTypes ?? [];
   const bound = computeMaxFirstCombosBound(board, opts);
 
   const dora = await solveDoraParallel(board, {
     beamWidth: opts.beamWidth ?? 200, maxPath: opts.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: opts.priorityCells ?? [], startCells, endCell, fireRoute, twoMatch, clearTypes,
+    priorityCells: opts.priorityCells ?? [], startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
   }, workers);
   let best = dora, achieved = dora.firstCombos;
 
@@ -257,7 +289,7 @@ async function solveMaxFirstCombosParallel(board, options = {}, workers = defaul
       sealedColumns, flags, minFirstCombos: n,
       beamWidth: opts.plannerBeamWidth ?? 300,
       maxPath: opts.plannerMaxPath ?? 60,
-      startCells, endCell, fireRoute, twoMatch, clearTypes,
+      startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
     };
     const res = clearTypes.length > 0
       ? await solveClearAllParallel(board, plannerOpts, workers)

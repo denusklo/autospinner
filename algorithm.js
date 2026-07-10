@@ -78,6 +78,13 @@ function fireBlocked(path, nx, ny, fireLen) {
   return false;
 }
 
+function firstWaveNoOk(sim, types) {
+  for (const t of types ?? []) {
+    if ((sim.firstClearedByType[t] ?? 0) > 0) return false;
+  }
+  return true;
+}
+
 /**
  * Represents the game board state
  */
@@ -948,9 +955,11 @@ class BoardSimulator {
    *   with NO_DISSOLVE behave like sealed cells. Composes with sealedColumns.
    * @param {Iterable<number>|null} twoMatch rune types that dissolve at a run of
    *   TWO instead of three (boss mechanic, `--2-match`). Everything else needs 3.
+   * @param {Iterable<number>|null} noSolvableTypes rune types that never dissolve,
+   *   even when aligned in a valid run.
    * @returns {Array<{type: number, cells: Array<[number, number]>}>}
    */
-  static findComboGroups(board, sealedColumns = [], flags = null, twoMatch = null) {
+  static findComboGroups(board, sealedColumns = [], flags = null, twoMatch = null, noSolvableTypes = null) {
     // HOT PATH: called for every beam child and every cascade wave (millions
     // of times per solve). Internals use flat Uint8Arrays and bitmasks
     // instead of Sets/nested bool arrays/closures — the results (group
@@ -962,6 +971,8 @@ class BoardSimulator {
     for (const c of sealedColumns) sealedMask |= 1 << c;
     let twoMask = 0;
     if (twoMatch) for (const t of twoMatch) twoMask |= 1 << t;
+    let noSolveMask = 0;
+    if (noSolvableTypes) for (const t of noSolvableTypes) noSolveMask |= 1 << t;
     const n = w * h;
     // Module-level scratch reused across calls (this function never calls
     // itself and each JS isolate is single-threaded, so no reentrancy): GC
@@ -987,7 +998,7 @@ class BoardSimulator {
       let x = 0;
       while (x < w) {
         const type = row[x];
-        if (type === -1 || type === FROZEN || blocked[base + x] === 1) { x++; continue; }
+        if (type === -1 || type === FROZEN || ((noSolveMask >>> type) & 1) === 1 || blocked[base + x] === 1) { x++; continue; }
         let end = x + 1;
         while (end < w && blocked[base + end] === 0 && row[end] === type) end++;
         if (end - x >= (((twoMask >>> type) & 1) === 1 ? 2 : 3)) {
@@ -1003,7 +1014,7 @@ class BoardSimulator {
       let y = 0;
       while (y < h) {
         const type = g[y][x];
-        if (type === -1 || type === FROZEN || blocked[y * w + x] === 1) { y++; continue; }
+        if (type === -1 || type === FROZEN || ((noSolveMask >>> type) & 1) === 1 || blocked[y * w + x] === 1) { y++; continue; }
         let end = y + 1;
         while (end < h && blocked[end * w + x] === 0 && g[end][x] === type) end++;
         if (end - y >= (((twoMask >>> type) & 1) === 1 ? 2 : 3)) {
@@ -1063,13 +1074,14 @@ class BoardSimulator {
     const sealedColumns = options.sealedColumns ?? [];
     const flags = options.flags ?? null;
     const twoMatch = options.twoMatch ?? null;
+    const noSolvableTypes = options.noSolvableTypes ?? null;
     const work = board.clone();
     let totalCombos = 0, firstCombos = 0, firstRunes = 0, chains = 0;
     const firstClearedByType = Array(6).fill(0);
     const allGroups = [];
 
     while (true) {
-      const groups = BoardSimulator.findComboGroups(work, sealedColumns, flags, twoMatch);
+      const groups = BoardSimulator.findComboGroups(work, sealedColumns, flags, twoMatch, noSolvableTypes);
       if (groups.length === 0) break;
       chains++;
       if (chains === 1) {
@@ -1165,6 +1177,11 @@ class DoraSolver {
     // Rune types that dissolve at a run of 2 instead of 3 (boss `--2-match`).
     // Threaded into every BoardSimulator.resolve so scoring/combos reflect it.
     this.twoMatch = options.twoMatch ?? null;
+    // Rune types that never dissolve at all, even when aligned.
+    this.noSolvableTypes = [...new Set(options.noSolvableTypes ?? [])];
+    // Rune types forbidden from dissolving in the FIRST wave. They may still
+    // dissolve after gravity/cascades; only the opening dissolve is blocked.
+    this.firstWaveNoTypes = [...new Set(options.firstWaveNoTypes ?? [])];
     // Parallel-driver hooks (phone/parallel.js; browser-pure, both inert by
     // default). emitFrontier: run only maxPath steps, then return the live
     // beam as plain serializable states plus best/bestQualified found so far
@@ -1254,6 +1271,7 @@ class DoraSolver {
         if (nd[base + x] === 1) continue;
         const t = row[x];
         if (t === -1 || t === FROZEN) continue; // frozen pairs can never become a group
+        if (this.noSolvableTypes.includes(t)) continue;
         if (types !== null && !types.includes(t)) continue;
         if (x + 1 < w && nd[base + x + 1] === 0 && row[x + 1] === t) pairs++;
         if (y + 1 < h && nd[base + w + x] === 0 && g[y + 1][x] === t) pairs++;
@@ -1284,7 +1302,7 @@ class DoraSolver {
    * Spec §2 Step 5 (calculateWeight), on the fully-resolved cascade result.
    */
   calculateWeight(board) {
-    const sim = BoardSimulator.resolve(board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch});
+    const sim = BoardSimulator.resolve(board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes});
     const t = this.tunable;
     let weight = 0;
     for (const g of sim.groups) {
@@ -1341,7 +1359,7 @@ class DoraSolver {
       }
     }
 
-    let best = null, bestQualified = null, bestClearAllOnly = null;
+    let best = null, bestQualified = null, bestHardOnly = null;
     const better = (a, b) => {
       if (b === null) return true;
       if (a.weight !== b.weight) return a.weight > b.weight;
@@ -1423,8 +1441,13 @@ class DoraSolver {
                 steer += this.pairPotential(childBoard, this.clearTypes) * this.tunable.pairSteer;
               }
             }
+            const firstWaveNoClear = this.firstWaveNoTypes.reduce((n, t) => n + sim.firstClearedByType[t], 0);
+            const firstWaveNoOk = firstWaveNoClear === 0;
+            if (this.firstWaveNoTypes.length > 0) {
+              steer -= firstWaveNoClear * this.tunable.firstComboSteer * 2;
+            }
             sc = {
-              weight, steer, clearAllOk,
+              weight, steer, clearAllOk, firstWaveNoOk,
               comboCount: sim.totalCombos, firstCombos: sim.firstCombos,
               firstRunes: sim.firstRunes, firstClearedByType: sim.firstClearedByType,
               chains: sim.chains,
@@ -1454,18 +1477,21 @@ class DoraSolver {
             && (this.minFirstRunes === 0 || (this.exactFirstRunes
               ? sc.firstRunes === this.minFirstRunes
               : sc.firstRunes >= this.minFirstRunes))
-            && sc.clearAllOk;
-          if ((this.minFirstCombos > 0 || this.minFirstRunes > 0 || this.clearTypes.length > 0)
+            && sc.clearAllOk
+            && sc.firstWaveNoOk;
+          if ((this.minFirstCombos > 0 || this.minFirstRunes > 0
+                || this.clearTypes.length > 0 || this.firstWaveNoTypes.length > 0)
               && qualifies && endOk && better(child, bestQualified)) bestQualified = child;
-          // clearTypes is a MANDATORY demand (P14: real boss requirement),
-          // unlike minFirstCombos/minFirstRunes which are optional targets.
-          // Track the best clear-all-satisfying state on its own so an
+          // clearTypes and firstWaveNoTypes are MANDATORY demands, unlike
+          // minFirstCombos/minFirstRunes which are optional targets.
+          // Track the best hard-demand-satisfying state on its own so an
           // unreachable combo/rune target (e.g. --first-combos max asking
           // for more combos than compose with clearing every required rune)
           // can't make the final pick silently drop the mandatory demand and
           // fall all the way to the fully-unconstrained `best`.
-          if (this.clearTypes.length > 0 && sc.clearAllOk && endOk && better(child, bestClearAllOnly)) {
-            bestClearAllOnly = child;
+          if ((this.clearTypes.length > 0 || this.firstWaveNoTypes.length > 0)
+              && sc.clearAllOk && sc.firstWaveNoOk && endOk && better(child, bestHardOnly)) {
+            bestHardOnly = child;
           }
         }
       }
@@ -1494,7 +1520,7 @@ class DoraSolver {
         })),
         best: best === null ? null : this._solution(best),
         bestQualified: bestQualified === null ? null : this._solution(bestQualified),
-        bestClearAllOnly: bestClearAllOnly === null ? null : this._solution(bestClearAllOnly),
+        bestHardOnly: bestHardOnly === null ? null : this._solution(bestHardOnly),
       };
     }
 
@@ -1502,7 +1528,7 @@ class DoraSolver {
     // target is unreachable jointly with a MANDATORY clear-all demand, prefer
     // a solution that still satisfies clear-all over the fully-unconstrained
     // best (which may violate it) — see bestClearAllOnly comment above.
-    const pick = bestQualified ?? bestClearAllOnly ?? best;
+    const pick = bestQualified ?? bestHardOnly ?? best;
     if (pick === null) {
       return {startX: 0, startY: 0, path: [{x: 0, y: 0}], moves: [], score: 0, comboCount: 0, firstCombos: 0, firstRunes: 0, firstClearedByType: Array(6).fill(0), chains: 0, board: this.board.clone()};
     }
@@ -1563,6 +1589,8 @@ class TargetPlanner {
     this.endCell = options.endCell ?? null;
     this.fireRoute = options.fireRoute ?? 0; // see fireBlocked
     this.twoMatch = options.twoMatch ?? null; // types dissolving at run of 2
+    this.noSolvableTypes = [...new Set(options.noSolvableTypes ?? [])];
+    this.firstWaveNoTypes = [...new Set(options.firstWaveNoTypes ?? [])];
     // Clear-all-of-type demand, VERIFICATION-ONLY here: phase 1 targets
     // first-wave combo count, not required-type coverage, so routed targets
     // violating clearTypes are rejected rather than constructed. DoraSolver's
@@ -1628,6 +1656,7 @@ class TargetPlanner {
         if (i === set.length) return true;
         const options = [];
         for (let c = 0; c < 6; c++) {
+          if (this.firstWaveNoTypes.includes(c) || this.noSolvableTypes.includes(c)) continue;
           if (remaining[c] < 3) continue;
           let clash = false;
           for (let j = 0; j < i; j++) {
@@ -1814,6 +1843,7 @@ class TargetPlanner {
 
   /** All straight-line placements of `len` usable cells of `type` (h and v). */
   linePlacements(type, len) {
+    if (this.noSolvableTypes.includes(type)) return [];
     const w = this.board.width, h = this.board.height;
     const usable = (x, y) => this.dissolvable(x, y) && this.movable(x, y);
     const out = [];
@@ -1862,6 +1892,7 @@ class TargetPlanner {
   /** Coverage-only candidate targets for the clear-all demand (cartesian across
    * types, hard-capped). Each target = array of dissolving line-groups. */
   planClearAllTargets() {
+    if (this.clearTypes.some(t => this.firstWaveNoTypes.includes(t) || this.noSolvableTypes.includes(t))) return [];
     const perType = this.clearTypes.map(t => this.coverageSets(t, 30));
     if (perType.some(list => list.length === 0)) return [];
     let combos = [[]];
@@ -1897,7 +1928,8 @@ class TargetPlanner {
       tried++;
       const route = this.routeToTarget(target);
       if (route === null) continue;
-      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch});
+      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes});
+      if (!firstWaveNoOk(sim, this.firstWaveNoTypes)) continue;
       if (this.clearTypes.some(t => sim.firstClearedByType[t] < this.clearTypeTotals[t])) continue;
       if (this.clearAllComboFloor > 0 && (this.exact ? sim.firstCombos !== this.clearAllComboFloor : sim.firstCombos < this.clearAllComboFloor)) continue;
       if (sim.totalCombos > bestCombos) {
@@ -1927,9 +1959,10 @@ class TargetPlanner {
       tried++;
       const route = this.routeToTarget(target);
       if (route === null) continue;
-      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch});
+      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes});
       // reject accidental merges/extras (exact) or shortfalls (both modes)
       if (this.exact ? sim.firstCombos !== this.target : sim.firstCombos < this.target) continue;
+      if (!firstWaveNoOk(sim, this.firstWaveNoTypes)) continue;
       // reject routes that violate a clear-all-of-type demand
       if (this.clearTypes.some(t => sim.firstClearedByType[t] < this.clearTypeTotals[t])) continue;
       if (this.verbose) console.log(`[TargetPlanner] target #${tried} routed in ${route.moves.length} moves, first=${sim.firstCombos}`);
@@ -1964,18 +1997,20 @@ class TargetPlanner {
 function computeMaxFirstCombosBound(board, options = {}) {
   const sealedColumns = options.sealedColumns ?? [];
   const flags = options.flags ?? null;
+  const firstWaveNoTypes = options.firstWaveNoTypes ?? [];
+  const noSolvableTypes = options.noSolvableTypes ?? [];
   const flag = (x, y) => flags === null ? 0 : flags[y][x];
   const counts = Array(6).fill(0);
   let resolvableCells = 0;
   for (let y = 0; y < board.height; y++) {
     for (let x = 0; x < board.width; x++) {
       const v = board.get(x, y);
-      if ((flag(x, y) & CELL_FLAGS.NO_SWAP) === 0 && v >= 0 && v < FROZEN) counts[v]++;
-      if (!sealedColumns.includes(x) && v !== FROZEN
+      if ((flag(x, y) & CELL_FLAGS.NO_SWAP) === 0 && v >= 0 && v < FROZEN && !noSolvableTypes.includes(v)) counts[v]++;
+      if (!sealedColumns.includes(x) && v !== FROZEN && !noSolvableTypes.includes(v)
           && (flag(x, y) & (CELL_FLAGS.NO_DISSOLVE | CELL_FLAGS.NO_SWAP)) === 0) resolvableCells++;
     }
   }
-  const colorBound = counts.reduce((s, c) => s + Math.floor(c / 3), 0);
+  const colorBound = counts.reduce((s, c, t) => s + (firstWaveNoTypes.includes(t) ? 0 : Math.floor(c / 3)), 0);
   return Math.min(colorBound, Math.floor(resolvableCells / 3));
 }
 
@@ -1987,12 +2022,14 @@ function solveMaxFirstCombos(board, options = {}) {
   const fireRoute = options.fireRoute ?? 0;
   const twoMatch = options.twoMatch ?? null;
   const clearTypes = options.clearTypes ?? [];
+  const firstWaveNoTypes = options.firstWaveNoTypes ?? [];
+  const noSolvableTypes = options.noSolvableTypes ?? [];
   const bound = computeMaxFirstCombosBound(board, options);
 
   const dora = new DoraSolver(board, {
     beamWidth: options.beamWidth ?? 200, maxPath: options.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: options.priorityCells ?? [], startCells, endCell, fireRoute, twoMatch, clearTypes,
+    priorityCells: options.priorityCells ?? [], startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
   }).solve();
   let best = dora, achieved = dora.firstCombos;
 
@@ -2001,7 +2038,7 @@ function solveMaxFirstCombos(board, options = {}) {
       sealedColumns, flags, minFirstCombos: n,
       beamWidth: options.plannerBeamWidth ?? 300,
       maxPath: options.plannerMaxPath ?? 60,
-      startCells, endCell, fireRoute, twoMatch, clearTypes,
+      startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
     }).solve();
     if (res.solution) { best = res.solution; achieved = n; break; }
   }

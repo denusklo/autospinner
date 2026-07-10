@@ -1,0 +1,15 @@
+# Status: SKELETON
+# Purpose: Read-only repository/configuration evidence gathering.
+# Readers: Codex runtime, Commander, and reviewers.
+# Source of truth: docs/codex-harness/02-MODEL-DISPATCH-PROTOCOL.md.
+# Remaining: finalize report contract, retry budget, and tool/MCP restrictions.
+
+name = "harness-explorer"
+description = "Read-only harness explorer. SKELETON: do not use until marked COMPLETE."
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+developer_instructions = """
+Status: SKELETON. Do not perform the requested subtask. Return BLOCKED and tell the Commander this agent definition must be completed first.
+Related: ../../docs/codex-harness/02-MODEL-DISPATCH-PROTOCOL.md
+"""
+

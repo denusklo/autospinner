@@ -29,6 +29,29 @@ const CELL_FLAGS = {
  */
 const FROZEN = 6;
 
+/**
+ * Shielded rune (PROJECT-FACTS P24, corrected 2026-07-10 — see P30/L40): a
+ * PER-RUNE travelling status, same family as FROZEN above (travels WITH the
+ * dragged rune, so it needs the same in-band board-value trick — a plain
+ * positional Set can't follow a rune through a drag path). UNLIKE frozen,
+ * a shielded rune matches and dissolves completely normally (joins runs with
+ * plain runes of the same color, counts toward clear-type demands, etc.) —
+ * the ONLY special rule is at the WHOLE-BOARD level: if a color still has
+ * >=1 shielded rune before this move, it must still have >=1 AFTER every
+ * cascade wave resolves (User-stated: "if board has zero shield rune, the
+ * card cannot attack"). Modeled as SHIELD_BASE + baseType (values 7..12 for
+ * the 6 rune types) so the value travels through Board.swap/set/clone
+ * exactly like FROZEN does, with no extra per-call wiring needed anywhere
+ * that only moves values around. Anywhere board values are inspected for
+ * their MATCHABLE type (run scans, pair potential, clear-type totals),
+ * convert through `baseType()` first; anywhere the raw distinction matters
+ * (is this specific cell shielded right now), use `isShielded()`.
+ */
+const SHIELD_BASE = 7;
+const SHIELD_TYPE_OF = [0, 1, 2, 3, 4, 5, FROZEN, 0, 1, 2, 3, 4, 5];
+function baseType(v) { return v >= 0 ? SHIELD_TYPE_OF[v] : v; }
+function isShielded(v) { return v >= SHIELD_BASE; }
+
 // Reusable scratch buffers for BoardSimulator.findComboGroups (hot path:
 // millions of calls per solve; per-call allocation made GC ~46% of solver
 // CPU). Safe because the function never re-enters and JS isolates are
@@ -81,6 +104,18 @@ function fireBlocked(path, nx, ny, fireLen) {
 function firstWaveNoOk(sim, types) {
   for (const t of types ?? []) {
     if ((sim.firstClearedByType[t] ?? 0) > 0) return false;
+  }
+  return true;
+}
+
+// --first-wave-have (P32): the mirror image of firstWaveNoOk — every listed
+// type must clear AT LEAST ONE rune in wave 1 (not necessarily all of it,
+// unlike clearTypes/P14). Callers are expected to pass an already-feasible
+// list (autospin.js drops types with too few runes on the board before
+// calling the solver, per the CLEAR_ALL_INFEASIBLE-style interactive prompt).
+function firstWaveHaveOk(sim, types) {
+  for (const t of types ?? []) {
+    if ((sim.firstClearedByType[t] ?? 0) === 0) return false;
   }
   return true;
 }
@@ -997,10 +1032,10 @@ class BoardSimulator {
       const row = g[y], base = y * w;
       let x = 0;
       while (x < w) {
-        const type = row[x];
+        const type = baseType(row[x]);
         if (type === -1 || type === FROZEN || ((noSolveMask >>> type) & 1) === 1 || blocked[base + x] === 1) { x++; continue; }
         let end = x + 1;
-        while (end < w && blocked[base + end] === 0 && row[end] === type) end++;
+        while (end < w && blocked[base + end] === 0 && baseType(row[end]) === type) end++;
         if (end - x >= (((twoMask >>> type) & 1) === 1 ? 2 : 3)) {
           for (let i = x; i < end; i++) marked[base + i] = 1;
         }
@@ -1013,10 +1048,10 @@ class BoardSimulator {
       if (((sealedMask >>> x) & 1) === 1) continue;
       let y = 0;
       while (y < h) {
-        const type = g[y][x];
+        const type = baseType(g[y][x]);
         if (type === -1 || type === FROZEN || ((noSolveMask >>> type) & 1) === 1 || blocked[y * w + x] === 1) { y++; continue; }
         let end = y + 1;
-        while (end < h && blocked[end * w + x] === 0 && g[end][x] === type) end++;
+        while (end < h && blocked[end * w + x] === 0 && baseType(g[end][x]) === type) end++;
         if (end - y >= (((twoMask >>> type) & 1) === 1 ? 2 : 3)) {
           for (let i = y; i < end; i++) marked[i * w + x] = 1;
         }
@@ -1033,7 +1068,7 @@ class BoardSimulator {
       for (let x0 = 0; x0 < w; x0++) {
         const i0 = y0 * w + x0;
         if (marked[i0] === 0 || visited[i0] === 1) continue;
-        const type = g[y0][x0];
+        const type = baseType(g[y0][x0]);
         const cells = [];
         stack.length = 0;
         stack.push(i0);
@@ -1042,16 +1077,16 @@ class BoardSimulator {
           const ci = stack.pop();
           const cx = ci % w, cy = (ci - cx) / w;
           cells.push([cx, cy]);
-          if (cx + 1 < w && visited[ci + 1] === 0 && marked[ci + 1] === 1 && g[cy][cx + 1] === type) {
+          if (cx + 1 < w && visited[ci + 1] === 0 && marked[ci + 1] === 1 && baseType(g[cy][cx + 1]) === type) {
             visited[ci + 1] = 1; stack.push(ci + 1);
           }
-          if (cx - 1 >= 0 && visited[ci - 1] === 0 && marked[ci - 1] === 1 && g[cy][cx - 1] === type) {
+          if (cx - 1 >= 0 && visited[ci - 1] === 0 && marked[ci - 1] === 1 && baseType(g[cy][cx - 1]) === type) {
             visited[ci - 1] = 1; stack.push(ci - 1);
           }
-          if (cy + 1 < h && visited[ci + w] === 0 && marked[ci + w] === 1 && g[cy + 1][cx] === type) {
+          if (cy + 1 < h && visited[ci + w] === 0 && marked[ci + w] === 1 && baseType(g[cy + 1][cx]) === type) {
             visited[ci + w] = 1; stack.push(ci + w);
           }
-          if (cy - 1 >= 0 && visited[ci - w] === 0 && marked[ci - w] === 1 && g[cy - 1][cx] === type) {
+          if (cy - 1 >= 0 && visited[ci - w] === 0 && marked[ci - w] === 1 && baseType(g[cy - 1][cx]) === type) {
             visited[ci - w] = 1; stack.push(ci - w);
           }
         }
@@ -1064,21 +1099,93 @@ class BoardSimulator {
   /**
    * Clear matches, apply gravity, repeat until stable (spec §2 Step 4).
    * Mutates a clone; the input board is untouched.
-   * @returns {{totalCombos, firstCombos, firstRunes, firstClearedByType, chains, groups, boardAfter}}
+   * @param {Iterable<number>|null} options.hazardPositions x*10+y packed
+   *   positions that must NEVER appear in any dissolving group, in ANY
+   *   cascade wave (P22) — matched using NORMAL (unmodified) run rules, not
+   *   a structural exclusion; see hazardViolated below.
+   * @returns {{totalCombos, firstCombos, firstRunes, firstClearedByType, chains, groups, boardAfter, hazardViolated, shieldViolated, shieldRemaining, shieldTotal}}
    *   firstRunes = total orbs dissolved in the FIRST wave (some bosses, e.g.
    *   楊玉環 "NUM N", require clearing >= N runes in the first batch to deal
    *   damage — distinct from combo COUNT). firstClearedByType[t] = orbs of
    *   type t dissolved in the first wave (clear-all-of-type demands).
+   *   hazardViolated = true if any wave's dissolve touched a hazardPositions
+   *   cell — the caller must treat this board as an invalid/forbidden
+   *   outcome, not merely a suboptimal one.
+   *   shieldViolated = true if, for some type t, the board started with
+   *   shieldTotal[t] > 0 and ended with shieldRemaining[t] === 0 across all
+   *   cascade waves (P30) — a shielded rune CAN dissolve normally, it's only
+   *   forbidden to reduce a color's shield count to zero (User-stated: "if
+   *   board has zero shield rune, the card cannot attack").
+   *   reserveViolated = true if, for some type t in options.reserveTypes, its
+   *   on-board count dropped below its OWN min-run threshold (2 for a
+   *   twoMatch type, else 3) across all cascade waves combined — i.e. this
+   *   wave didn't just clear some of type t, it left too few to ever form
+   *   another whole combo of it. Used by `--first-wave-have` (P32): when a
+   *   co-listed type can't be achieved this round (too few on the board),
+   *   the achievable types must not be drained past their own combo floor,
+   *   so a future spin can still form a fresh combo of them once the
+   *   deficient type is replenished by skyfall.
    */
   static resolve(board, options = {}) {
     const sealedColumns = options.sealedColumns ?? [];
     const flags = options.flags ?? null;
     const twoMatch = options.twoMatch ?? null;
     const noSolvableTypes = options.noSolvableTypes ?? null;
+    // Positional "never dissolve here" hazard cells (P22, fixed 2026-07-10 —
+    // see LESSONS L34). UNLIKE sealedColumns/CELL_FLAGS.NO_DISSOLVE, this is
+    // NOT a structural match-finding exclusion: the User confirmed live that
+    // the real game does NOT break a run at a hazard cell — a run of 4
+    // touching one hazard cell dissolves ALL 4, hazard cell included, same
+    // as normal match-3 rules. The old NO_DISSOLVE modeling was WRONG here:
+    // it silently "trimmed" a 4-run to a 3-run excluding the hazard cell,
+    // which the solver treated as a perfectly good, hazard-safe outcome —
+    // while the real game actually sweeps the hazard cell into the SAME
+    // dissolve. So matching runs NORMALLY (hazard cells fully eligible,
+    // exactly like the real engine) and instead flagging the RESULT as
+    // invalid whenever any group in ANY wave touches a hazard position is
+    // the only model consistent with what was observed live.
+    // Accepts EITHER a pre-packed Set (what DoraSolver/TargetPlanner hold
+    // internally) OR a plain array of {x,y} (what autospin.js builds from
+    // recognition and passes to both solver constructors AND direct
+    // resolve() diagnostic calls) — normalize here so callers don't need to
+    // track which form a given call site expects.
+    const hazardPositions = options.hazardPositions
+      ? (options.hazardPositions instanceof Set ? options.hazardPositions
+        : new Set(options.hazardPositions.map(p => p.x * 10 + p.y)))
+      : null;
     const work = board.clone();
     let totalCombos = 0, firstCombos = 0, firstRunes = 0, chains = 0;
     const firstClearedByType = Array(6).fill(0);
     const allGroups = [];
+    let hazardViolated = false;
+    // Shield mechanic (P24, corrected P30/L40): count per-type shielded
+    // runes present at the start, decrement as they're actually swept into a
+    // dissolving group (checked BEFORE the cell is cleared to -1, below).
+    const shieldTotal = Array(6).fill(0);
+    for (let y = 0; y < work.height; y++) {
+      for (let x = 0; x < work.width; x++) {
+        const v = work.get(x, y);
+        if (isShielded(v)) shieldTotal[baseType(v)]++;
+      }
+    }
+    const shieldRemaining = shieldTotal.slice();
+    // Reserve-floor types (P32, --first-wave-have's partial-infeasibility
+    // fallback): track total cleared per type across ALL waves (not just
+    // wave 1 — a type drained via later cascades is just as unavailable next
+    // round), compared against its own min-run threshold at the end.
+    const reserveTypes = options.reserveTypes ?? null;
+    const twoMatchSet = twoMatch ? new Set(twoMatch) : null;
+    const minRunOf = t => twoMatchSet && twoMatchSet.has(t) ? 2 : 3;
+    const reserveTotal = Array(6).fill(0);
+    if (reserveTypes) {
+      for (let y = 0; y < work.height; y++) {
+        for (let x = 0; x < work.width; x++) {
+          const bt = baseType(work.get(x, y));
+          if (bt >= 0 && bt < FROZEN) reserveTotal[bt]++;
+        }
+      }
+    }
+    const totalClearedByType = Array(6).fill(0);
 
     while (true) {
       const groups = BoardSimulator.findComboGroups(work, sealedColumns, flags, twoMatch, noSolvableTypes);
@@ -1091,9 +1198,22 @@ class BoardSimulator {
       }
       totalCombos += groups.length;
       allGroups.push(...groups);
+      for (const g of groups) totalClearedByType[g.type] += g.cells.length;
+
+      if (hazardPositions && !hazardViolated) {
+        outer: for (const g of groups) {
+          for (const [x, y] of g.cells) {
+            if (hazardPositions.has(x * 10 + y)) { hazardViolated = true; break outer; }
+          }
+        }
+      }
 
       for (const g of groups) {
-        for (const [x, y] of g.cells) work.set(x, y, -1);
+        for (const [x, y] of g.cells) {
+          const v = work.get(x, y);
+          if (isShielded(v)) shieldRemaining[baseType(v)]--;
+          work.set(x, y, -1);
+        }
       }
 
       // Gravity: per column, compact non-empty cells to the bottom
@@ -1110,7 +1230,11 @@ class BoardSimulator {
       }
     }
 
-    return {totalCombos, firstCombos, firstRunes, firstClearedByType, chains, groups: allGroups, boardAfter: work};
+    const shieldViolated = shieldTotal.some((n, t) => n > 0 && shieldRemaining[t] < 1);
+    const reserveViolated = reserveTypes
+      ? [...reserveTypes].some(t => (reserveTotal[t] - totalClearedByType[t]) < minRunOf(t))
+      : false;
+    return {totalCombos, firstCombos, firstRunes, firstClearedByType, totalClearedByType, chains, groups: allGroups, boardAfter: work, hazardViolated, shieldViolated, shieldRemaining, shieldTotal, reserveViolated};
   }
 }
 
@@ -1160,16 +1284,23 @@ class DoraSolver {
     this.exactFirstRunes = options.exactFirstRunes ?? false;
     // Optional start/end pinning (phone --start/--end). Coordinates are {x,y}
     // = {column, row}. startCells: the drag may only BEGIN from one of these
-    // cells (default null = every pickable cell is seeded). endCell: the held
-    // rune must OCCUPY this cell at the END of the returned path (default null
-    // = any). Both are orthogonal to every scoring/steering knob — they only
-    // restrict which cells seed the beam and which states are eligible to be
-    // the final answer, so they compose with sealedColumns/flags/first-wave
-    // targets/priority cells unchanged. If endCell is never reached within
-    // maxPath the solver returns the degenerate empty solution (moves=0), and
-    // the caller aborts (phone: [TOS] ABORT=start-end).
+    // cells (default null = every pickable cell is seeded). endCells: the
+    // held rune must OCCUPY ANY ONE of these cells at the END of the returned
+    // path (default null = any) — a pure eligibility filter, not a bias, so
+    // when multiple end cells are given the solver naturally picks whichever
+    // qualifying one scores best under the SAME weight/steer scoring already
+    // used for everything else (2026-07-10, User-requested: "multiple end
+    // point to input and can end at any of it, outcome with best combo").
+    // Both are orthogonal to every scoring/steering knob — they only restrict
+    // which cells seed the beam and which states are eligible to be the final
+    // answer, so they compose with sealedColumns/flags/first-wave targets/
+    // priority cells unchanged. If no end cell is ever reached within maxPath
+    // the solver returns the degenerate empty solution (moves=0), and the
+    // caller aborts (phone: [TOS] ABORT=start-end). Accepts either
+    // options.endCells (array) or the legacy options.endCell (single {x,y})
+    // for backward compatibility.
     this.startCells = options.startCells ?? null;
-    this.endCell = options.endCell ?? null;
+    this.endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
     // Fire-route trail length (see fireBlocked). 0 = off. When >0 the drag may
     // not re-enter any of the last `fireRoute` cells it left (self-avoiding
     // within a sliding window). Orthogonal to scoring; composes with everything.
@@ -1182,6 +1313,26 @@ class DoraSolver {
     // Rune types forbidden from dissolving in the FIRST wave. They may still
     // dissolve after gravity/cascades; only the opening dissolve is blocked.
     this.firstWaveNoTypes = [...new Set(options.firstWaveNoTypes ?? [])];
+    // Rune types that must EACH clear at least one rune in the FIRST wave
+    // (P32, `--first-wave-have`) — mirror image of firstWaveNoTypes. Callers
+    // (autospin.js) are expected to have already dropped any type that's
+    // provably infeasible this round (too few on the board), same pattern as
+    // clearTypes' CLEAR_ALL_INFEASIBLE prompt.
+    this.firstWaveHaveTypes = [...new Set(options.firstWaveHaveTypes ?? [])];
+    // Types that must not be drained below their own min-run threshold
+    // across ANY wave (P32's partial-infeasibility fallback: when a sibling
+    // --first-wave-have type can't be achieved this round, the achievable
+    // ones must keep enough on the board for a future combo, not just be
+    // freely consumed). Threaded straight into BoardSimulator.resolve.
+    this.reserveTypes = [...new Set(options.reserveTypes ?? [])];
+    // POSITIONAL cells that must never dissolve, in ANY wave (P22, fixed
+    // 2026-07-10, L34) — see BoardSimulator.resolve's hazardPositions doc.
+    // UNLIKE sealedColumns/flags, this does NOT exclude the cell from
+    // matching; a violating board is simply forbidden as a final answer
+    // (calculateWeight forces weight=-Infinity and solve() never lets it
+    // become best/bestQualified/bestHardOnly — see qualifies() below).
+    this.hazardPositions = options.hazardPositions
+      ? new Set(options.hazardPositions.map(p => p.x * 10 + p.y)) : null;
     // Parallel-driver hooks (phone/parallel.js; browser-pure, both inert by
     // default). emitFrontier: run only maxPath steps, then return the live
     // beam as plain serializable states plus best/bestQualified found so far
@@ -1206,7 +1357,10 @@ class DoraSolver {
       for (let y = 0; y < board.height; y++) {
         for (let x = 0; x < board.width; x++) {
           const v = board.get(x, y);
-          if (v >= 0 && v < FROZEN) this.clearTypeTotals[v]++; // frozen runes can't dissolve — never owed
+          // Shielded runes ARE owed here (baseType) — they dissolve normally
+          // (P30); only true FROZEN runes never dissolve and stay un-owed.
+          const bt = baseType(v);
+          if (bt >= 0 && bt < FROZEN) this.clearTypeTotals[bt]++;
         }
       }
     }
@@ -1269,12 +1423,12 @@ class DoraSolver {
       const row = g[y], base = y * w;
       for (let x = 0; x < w; x++) {
         if (nd[base + x] === 1) continue;
-        const t = row[x];
+        const t = baseType(row[x]);
         if (t === -1 || t === FROZEN) continue; // frozen pairs can never become a group
         if (this.noSolvableTypes.includes(t)) continue;
         if (types !== null && !types.includes(t)) continue;
-        if (x + 1 < w && nd[base + x + 1] === 0 && row[x + 1] === t) pairs++;
-        if (y + 1 < h && nd[base + w + x] === 0 && g[y + 1][x] === t) pairs++;
+        if (x + 1 < w && nd[base + x + 1] === 0 && baseType(row[x + 1]) === t) pairs++;
+        if (y + 1 < h && nd[base + w + x] === 0 && baseType(g[y + 1][x]) === t) pairs++;
       }
     }
     return pairs;
@@ -1292,7 +1446,7 @@ class DoraSolver {
     for (let y = 0; y < board.height; y++) {
       const row = board.grid[y], base = y * w;
       for (let x = 0; x < w; x++) {
-        if (nd[base + x] === 1 && this.clearTypes.includes(row[x])) n++;
+        if (nd[base + x] === 1 && this.clearTypes.includes(baseType(row[x]))) n++;
       }
     }
     return n;
@@ -1302,7 +1456,17 @@ class DoraSolver {
    * Spec §2 Step 5 (calculateWeight), on the fully-resolved cascade result.
    */
   calculateWeight(board) {
-    const sim = BoardSimulator.resolve(board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes});
+    const sim = BoardSimulator.resolve(board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes, hazardPositions: this.hazardPositions, reserveTypes: this.reserveTypes.length > 0 ? this.reserveTypes : null});
+    // A hazard violation (P22) is not merely suboptimal — it's forbidden.
+    // -Infinity keeps it out of the beam naturally (never wins a searchScore
+    // comparison) AND out of best/bestQualified/bestHardOnly (see solve()'s
+    // explicit `!sim.hazardViolated` gate below — weight alone isn't enough
+    // if EVERY reachable state happens to violate it).
+    // Same treatment for a shield violation (P30): reducing a color's
+    // shielded-rune count to zero is forbidden, not merely suboptimal.
+    // Same again for a reserve violation (P32): draining a --first-wave-have
+    // sibling type below its own combo floor is forbidden, not suboptimal.
+    if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated) return {weight: -Infinity, sim};
     const t = this.tunable;
     let weight = 0;
     for (const g of sim.groups) {
@@ -1446,8 +1610,26 @@ class DoraSolver {
             if (this.firstWaveNoTypes.length > 0) {
               steer -= firstWaveNoClear * this.tunable.firstComboSteer * 2;
             }
+            // Steer toward the --first-wave-have demand: reward each listed
+            // type's FIRST rune cleared in wave 1 (only the first — once a
+            // type is satisfied, more of it is no better for THIS demand),
+            // and count adjacent pairs of still-unsatisfied types as partial
+            // progress, same shape as clearAllOk's steering above.
+            let haveCount = 0;
+            for (const t of this.firstWaveHaveTypes) {
+              if (sim.firstClearedByType[t] > 0) { haveCount++; steer += this.tunable.firstComboSteer; }
+            }
+            const firstWaveHaveOkLocal = haveCount === this.firstWaveHaveTypes.length;
+            if (this.firstWaveHaveTypes.length > 0 && !firstWaveHaveOkLocal) {
+              const unmet = this.firstWaveHaveTypes.filter(t => sim.firstClearedByType[t] === 0);
+              steer += this.pairPotential(childBoard, unmet) * this.tunable.pairSteer;
+            }
             sc = {
               weight, steer, clearAllOk, firstWaveNoOk,
+              firstWaveHaveOk: firstWaveHaveOkLocal,
+              hazardOk: !sim.hazardViolated,
+              shieldOk: !sim.shieldViolated,
+              reserveOk: !sim.reserveViolated,
               comboCount: sim.totalCombos, firstCombos: sim.firstCombos,
               firstRunes: sim.firstRunes, firstClearedByType: sim.firstClearedByType,
               chains: sim.chains,
@@ -1466,11 +1648,21 @@ class DoraSolver {
             chains: sc.chains,
           };
           children.push(child);
-          // endCell gate: a state is only eligible as the final answer when
-          // the held rune sits on endCell (children still expand freely, so a
-          // path may pass through endCell and come back). null = no constraint.
-          const endOk = this.endCell === null || (nx === this.endCell.x && ny === this.endCell.y);
-          if (endOk && better(child, best)) best = child;
+          // endCells gate: a state is only eligible as the final answer when
+          // the held rune sits on ANY ONE of endCells (children still expand
+          // freely, so a path may pass through and come back). null = no
+          // constraint. Multiple end cells are not weighted/preferred among
+          // themselves — better() below picks the best-scoring one naturally.
+          const endOk = this.endCells === null || this.endCells.some(e => nx === e.x && ny === e.y);
+          // hazardOk/shieldOk/reserveOk gate EVERY tier unconditionally
+          // (P22/P30/P32): a hazard, shield, or reserve-floor violation is
+          // forbidden, not merely undesirable, so it must never become
+          // best/bestQualified/bestHardOnly even when no other demand is
+          // active. Weight alone (-Infinity in calculateWeight) isn't
+          // sufficient — if EVERY reachable state happened to violate it,
+          // `better()` would still pick one of them without this gate.
+          const constraintsOk = sc.hazardOk && sc.shieldOk && sc.reserveOk;
+          if (constraintsOk && endOk && better(child, best)) best = child;
           const qualifies = (this.minFirstCombos === 0 || (this.exactFirstCombos
               ? sc.firstCombos === this.minFirstCombos
               : sc.firstCombos >= this.minFirstCombos))
@@ -1478,19 +1670,21 @@ class DoraSolver {
               ? sc.firstRunes === this.minFirstRunes
               : sc.firstRunes >= this.minFirstRunes))
             && sc.clearAllOk
-            && sc.firstWaveNoOk;
+            && sc.firstWaveNoOk
+            && sc.firstWaveHaveOk;
           if ((this.minFirstCombos > 0 || this.minFirstRunes > 0
-                || this.clearTypes.length > 0 || this.firstWaveNoTypes.length > 0)
-              && qualifies && endOk && better(child, bestQualified)) bestQualified = child;
-          // clearTypes and firstWaveNoTypes are MANDATORY demands, unlike
-          // minFirstCombos/minFirstRunes which are optional targets.
-          // Track the best hard-demand-satisfying state on its own so an
-          // unreachable combo/rune target (e.g. --first-combos max asking
-          // for more combos than compose with clearing every required rune)
-          // can't make the final pick silently drop the mandatory demand and
-          // fall all the way to the fully-unconstrained `best`.
-          if ((this.clearTypes.length > 0 || this.firstWaveNoTypes.length > 0)
-              && sc.clearAllOk && sc.firstWaveNoOk && endOk && better(child, bestHardOnly)) {
+                || this.clearTypes.length > 0 || this.firstWaveNoTypes.length > 0 || this.firstWaveHaveTypes.length > 0)
+              && qualifies && constraintsOk && endOk && better(child, bestQualified)) bestQualified = child;
+          // clearTypes, firstWaveNoTypes, and firstWaveHaveTypes are all
+          // MANDATORY demands, unlike minFirstCombos/minFirstRunes which are
+          // optional targets. Track the best hard-demand-satisfying state on
+          // its own so an unreachable combo/rune target (e.g. --first-combos
+          // max asking for more combos than compose with clearing every
+          // required rune) can't make the final pick silently drop a
+          // mandatory demand and fall all the way to the fully-unconstrained
+          // `best`.
+          if ((this.clearTypes.length > 0 || this.firstWaveNoTypes.length > 0 || this.firstWaveHaveTypes.length > 0)
+              && sc.clearAllOk && sc.firstWaveNoOk && sc.firstWaveHaveOk && constraintsOk && endOk && better(child, bestHardOnly)) {
             bestHardOnly = child;
           }
         }
@@ -1586,11 +1780,22 @@ class TargetPlanner {
     // planner request will often report routing-failed — DoraSolver's steering
     // is the primary engine for start/end. startCells alone routes fine.
     this.startCells = options.startCells ?? null;
-    this.endCell = options.endCell ?? null;
+    this.endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
     this.fireRoute = options.fireRoute ?? 0; // see fireBlocked
     this.twoMatch = options.twoMatch ?? null; // types dissolving at run of 2
     this.noSolvableTypes = [...new Set(options.noSolvableTypes ?? [])];
     this.firstWaveNoTypes = [...new Set(options.firstWaveNoTypes ?? [])];
+    // --first-wave-have (P32) and its reserve-floor fallback — VERIFICATION-
+    // ONLY here (same reasoning as firstWaveNoTypes/hazardPositions): a
+    // routed target that doesn't satisfy the demand, or that drains a
+    // reserve-floor type too far, is rejected rather than steered around.
+    this.firstWaveHaveTypes = [...new Set(options.firstWaveHaveTypes ?? [])];
+    this.reserveTypes = [...new Set(options.reserveTypes ?? [])];
+    // POSITIONAL never-dissolve hazard cells (P22) — VERIFICATION-ONLY here,
+    // same reasoning as clearTypes just below: a routed target that happens
+    // to sweep a hazard cell into a dissolve is rejected, never constructed.
+    this.hazardPositions = options.hazardPositions
+      ? new Set(options.hazardPositions.map(p => p.x * 10 + p.y)) : null;
     // Clear-all-of-type demand, VERIFICATION-ONLY here: phase 1 targets
     // first-wave combo count, not required-type coverage, so routed targets
     // violating clearTypes are rejected rather than constructed. DoraSolver's
@@ -1602,7 +1807,8 @@ class TargetPlanner {
       for (let y = 0; y < board.height; y++) {
         for (let x = 0; x < board.width; x++) {
           const v = board.get(x, y);
-          if (v >= 0 && v < FROZEN) this.clearTypeTotals[v]++;
+          const bt = baseType(v); // shielded runes ARE owed (P30); frozen never are
+          if (bt >= 0 && bt < FROZEN) this.clearTypeTotals[bt]++;
         }
       }
     }
@@ -1766,7 +1972,7 @@ class TargetPlanner {
     const scoreOf = s => s.completed * 20000 + s.matched * 1000 - s.potential - s.path.length * 0.5;
 
     const startSet = this.startCells ? new Set(this.startCells.map(c => c.x + ',' + c.y)) : null;
-    const atEnd = (x, y) => this.endCell === null || (x === this.endCell.x && y === this.endCell.y);
+    const atEnd = (x, y) => this.endCells === null || this.endCells.some(e => x === e.x && y === e.y);
     let beam = [];
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
@@ -1928,7 +2134,9 @@ class TargetPlanner {
       tried++;
       const route = this.routeToTarget(target);
       if (route === null) continue;
-      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes});
+      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes, hazardPositions: this.hazardPositions, reserveTypes: this.reserveTypes.length > 0 ? this.reserveTypes : null});
+      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated) continue;
+      if (!firstWaveHaveOk(sim, this.firstWaveHaveTypes)) continue;
       if (!firstWaveNoOk(sim, this.firstWaveNoTypes)) continue;
       if (this.clearTypes.some(t => sim.firstClearedByType[t] < this.clearTypeTotals[t])) continue;
       if (this.clearAllComboFloor > 0 && (this.exact ? sim.firstCombos !== this.clearAllComboFloor : sim.firstCombos < this.clearAllComboFloor)) continue;
@@ -1948,10 +2156,96 @@ class TargetPlanner {
                 : {solution: null, reason: 'routing-failed', targetsTried: tried};
   }
 
+  // ---- first-wave-have via minimal coverage (PROJECT-FACTS P32/P33) ----
+  // Requiring N DIFFERENT types to each dissolve at least once in wave 1 is
+  // a much tighter simultaneous target than DoraSolver's greedy beam steering
+  // reliably finds (measured live: 5 types, only 2/5 achieved at beam 6400 —
+  // a genuine local optimum, not a bug). Unlike clear-all (which must cover
+  // a type's FULL count via coverageSets' partitioned multi-line dfs), "have"
+  // only needs ONE min-run line per type — so this reuses `linePlacements`
+  // directly with no partitioning, then the SAME cartesian-product-across-
+  // types + routeToTarget machinery as planClearAllTargets/solveClearAll.
+
+  /** Single min-run-length line placements of `type` — candidates for "at
+   * least one dissolve" (P32), as opposed to coverageSets' full-count
+   * partition (clear-all, P14). */
+  haveSets(type) {
+    const minRun = this.twoMatch && [...this.twoMatch].includes(type) ? 2 : 3;
+    return this.linePlacements(type, minRun);
+  }
+
+  /** Coverage-only candidate targets for the --first-wave-have demand: ONE
+   * min-run dissolving line per listed type (cartesian across types, hard-
+   * capped), never overlapping. Mirrors planClearAllTargets exactly, just
+   * with haveSets (single line) instead of coverageSets (partitioned full
+   * coverage) per type. */
+  planHaveTargets() {
+    if (this.firstWaveHaveTypes.some(t => this.firstWaveNoTypes.includes(t) || this.noSolvableTypes.includes(t))) return [];
+    const perType = this.firstWaveHaveTypes.map(t => this.haveSets(t));
+    if (perType.some(list => list.length === 0)) return [];
+    let combos = [[]];
+    for (const list of perType) {
+      const next = [];
+      for (const acc of combos) {
+        const cells = new Set(acc.flat().map(c => c.x + ',' + c.y));
+        for (const line of list) {
+          if (line.some(c => cells.has(c.x + ',' + c.y))) continue;
+          next.push([...acc, line]);
+          if (next.length >= 30) break;
+        }
+        if (next.length >= 30) break;
+      }
+      combos = next;
+      if (combos.length === 0) return [];
+    }
+    return combos;
+  }
+
+  /** Route many have-coverage placements; keep the one that satisfies every
+   * listed type (and the reserve floor / every other flag) with the MOST
+   * total combos. Same shape as solveClearAll(targetsOverride).
+   * @param {Array|null} targetsOverride route only these targets instead of
+   *   planning them here — used by phone/parallel.js to shard placements
+   *   across worker threads. */
+  solveHave(targetsOverride = null) {
+    const targets = targetsOverride ?? this.planHaveTargets();
+    if (targets.length === 0) return {solution: null, reason: 'no-feasible-target', targetsTried: 0};
+    let best = null, bestCombos = -1, tried = 0;
+    const budget = Math.max(this.maxTargets, 30);
+    for (const target of targets) {
+      if (tried >= budget) break;
+      tried++;
+      const route = this.routeToTarget(target);
+      if (route === null) continue;
+      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes, hazardPositions: this.hazardPositions, reserveTypes: this.reserveTypes.length > 0 ? this.reserveTypes : null});
+      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated) continue;
+      if (!firstWaveHaveOk(sim, this.firstWaveHaveTypes)) continue;
+      if (!firstWaveNoOk(sim, this.firstWaveNoTypes)) continue;
+      if (this.clearAllComboFloor > 0 && (this.exact ? sim.firstCombos !== this.clearAllComboFloor : sim.firstCombos < this.clearAllComboFloor)) continue;
+      if (sim.totalCombos > bestCombos) {
+        bestCombos = sim.totalCombos;
+        best = {
+          startX: route.startX, startY: route.startY,
+          path: route.path, moves: route.moves, board: route.board,
+          score: sim.totalCombos * 4, comboCount: sim.totalCombos,
+          firstCombos: sim.firstCombos, firstRunes: sim.firstRunes,
+          firstClearedByType: sim.firstClearedByType, chains: sim.chains,
+        };
+        if (this.verbose) console.log(`[TargetPlanner] have target #${tried}: combos=${sim.totalCombos}`);
+      }
+    }
+    return best ? {solution: best, reason: 'ok', targetsTried: tried}
+                : {solution: null, reason: 'routing-failed', targetsTried: tried};
+  }
+
   solve() {
     // Clear-all needs constructive coverage (beam search MISSes scattered scarce
     // types); route many coverage placements and keep the highest-combo one.
     if (this.clearTypes.length > 0) return this.solveClearAll();
+    // first-wave-have across several DIFFERENT types is a much tighter
+    // simultaneous target than DoraSolver's greedy steering reliably finds
+    // (P32/P33) — same constructive-coverage escape hatch as clear-all.
+    if (this.firstWaveHaveTypes.length > 0) return this.solveHave();
     const targets = this.planTargets();
     if (targets.length === 0) return {solution: null, reason: 'no-feasible-target', targetsTried: 0};
     let tried = 0;
@@ -1959,7 +2253,9 @@ class TargetPlanner {
       tried++;
       const route = this.routeToTarget(target);
       if (route === null) continue;
-      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes});
+      const sim = BoardSimulator.resolve(route.board, {sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch, noSolvableTypes: this.noSolvableTypes, hazardPositions: this.hazardPositions, reserveTypes: this.reserveTypes.length > 0 ? this.reserveTypes : null});
+      if (sim.hazardViolated || sim.shieldViolated || sim.reserveViolated) continue;
+      if (!firstWaveHaveOk(sim, this.firstWaveHaveTypes)) continue;
       // reject accidental merges/extras (exact) or shortfalls (both modes)
       if (this.exact ? sim.firstCombos !== this.target : sim.firstCombos < this.target) continue;
       if (!firstWaveNoOk(sim, this.firstWaveNoTypes)) continue;
@@ -2018,18 +2314,21 @@ function solveMaxFirstCombos(board, options = {}) {
   const sealedColumns = options.sealedColumns ?? [];
   const flags = options.flags ?? null;
   const startCells = options.startCells ?? null;
-  const endCell = options.endCell ?? null;
+  const endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
   const fireRoute = options.fireRoute ?? 0;
   const twoMatch = options.twoMatch ?? null;
   const clearTypes = options.clearTypes ?? [];
   const firstWaveNoTypes = options.firstWaveNoTypes ?? [];
+  const firstWaveHaveTypes = options.firstWaveHaveTypes ?? [];
+  const reserveTypes = options.reserveTypes ?? [];
   const noSolvableTypes = options.noSolvableTypes ?? [];
+  const hazardPositions = options.hazardPositions ?? null;
   const bound = computeMaxFirstCombosBound(board, options);
 
   const dora = new DoraSolver(board, {
     beamWidth: options.beamWidth ?? 200, maxPath: options.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: options.priorityCells ?? [], startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
+    priorityCells: options.priorityCells ?? [], startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
   }).solve();
   let best = dora, achieved = dora.firstCombos;
 
@@ -2038,7 +2337,7 @@ function solveMaxFirstCombos(board, options = {}) {
       sealedColumns, flags, minFirstCombos: n,
       beamWidth: options.plannerBeamWidth ?? 300,
       maxPath: options.plannerMaxPath ?? 60,
-      startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
+      startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
     }).solve();
     if (res.solution) { best = res.solution; achieved = n; break; }
   }
@@ -2047,5 +2346,5 @@ function solveMaxFirstCombos(board, options = {}) {
 
 // Export for use in content script
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN};
+  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE};
 }

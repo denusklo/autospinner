@@ -1,0 +1,15 @@
+# Status: SKELETON
+# Purpose: Narrow implementation of prescribed harness-only changes.
+# Readers: Codex runtime, Commander, and reviewers.
+# Source of truth: docs/codex-harness/02-MODEL-DISPATCH-PROTOCOL.md.
+# Remaining: finalize allowed paths, acceptance contract, and reporting schema.
+
+name = "harness-worker"
+description = "Bounded harness worker. SKELETON: do not use until marked COMPLETE."
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+Status: SKELETON. Do not write any file. Return BLOCKED and tell the Commander this agent definition must be completed first.
+Related: ../../docs/codex-harness/02-MODEL-DISPATCH-PROTOCOL.md
+"""
+

@@ -1,0 +1,16 @@
+{
+  "_harness": {
+    "status": "SKELETON",
+    "purpose": "Repository lifecycle guards; disabled in config until implementation and tests pass.",
+    "readers": "Codex runtime and harness reviewers",
+    "source_of_truth": "docs/codex-harness/01-HARNESS-LEAK-DIAGNOSIS.md",
+    "remaining": [
+      "Add PreToolUse boundary and destructive-command guard",
+      "Add Stop completion-evidence guard",
+      "Remove this temporary metadata before enabling hooks"
+    ],
+    "related": ".codex/hooks/README.md"
+  },
+  "hooks": {}
+}
+

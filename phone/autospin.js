@@ -26,6 +26,32 @@
  *     For first-wave constraints: DoraSolver tries first, TargetPlanner constructs the
  *     arrangement if the beam misses, abort only if impossible/unroutable
  *     (no touch sent on abort). --first-min-combos N = legacy alias for N+.
+ *   node phone/autospin.js --first-wave-have=w,g # first wave must dissolve AT LEAST
+ *                                                # ONE Water AND at least one Wood rune
+ *                                                # (does NOT need to clear ALL of a
+ *                                                # type — that's --clear-all). "all" =
+ *                                                # require all 6 types (very likely
+ *                                                # infeasible most rounds — expected).
+ *                                                # If a listed type has too few on the
+ *                                                # board to ever form a group this round
+ *                                                # (<3, or <2 for a 2-match type), prints
+ *                                                # FIRST_WAVE_HAVE_INFEASIBLE and asks
+ *                                                # [y/N] to drop it and continue with the
+ *                                                # rest (--force-partial-first-wave-have
+ *                                                # skips the prompt). When a type IS
+ *                                                # dropped, the remaining achievable
+ *                                                # type(s) get a RESERVE FLOOR: this wave
+ *                                                # may not drain them below their own
+ *                                                # min-run (3, or 2 for 2-match) worth,
+ *                                                # so a future spin can still pair them
+ *                                                # once the dropped type is replenished
+ *                                                # by skyfall. If DoraSolver's beam can't
+ *                                                # find all listed types at once (a much
+ *                                                # tighter target than 1-2 types — a real
+ *                                                # local optimum, not a bug), TargetPlanner
+ *                                                # CONSTRUCTS coverage the same way it does
+ *                                                # for --clear-all (one small group per type,
+ *                                                # not full clearance).
  *   node phone/autospin.js --clear-all heart      # first wave must dissolve EVERY
  *                                                # heart on the board (boss 首批消除
  *                                                # 所有X符石). Comma list for several
@@ -75,7 +101,11 @@
  *   node phone/autospin.js --end 5,1          # pin the drag's END cell; --start and
  *                                             # --end are independent (may differ) and
  *                                             # compose with every other flag below.
- *                                             # If the end can't be reached within
+ *                                             # Repeat --end to allow MULTIPLE end cells
+ *                                             # (--end 5,1 --end 0,4): the rune may land
+ *                                             # on ANY of them, and the solver picks
+ *                                             # whichever gives the best combo outcome.
+ *                                             # If no end can be reached within
  *                                             # --max-path the run aborts (no touch).
  *   node phone/autospin.js --fire-route       # drag leaves a fire trail: the last 6 cells
  *                                             # the finger LEFT stay on fire and cannot be
@@ -108,6 +138,35 @@
  *                                             # board-wide no-solvable prohibition-ring overlay
  *                                             # (any cell, `%` suffix; auto-detected but the ring
  *                                             # color can't be reliably read — default Wood).
+ *   node phone/autospin.js --after-spin-kill  # ignores every other flag/solver: after recognizing
+ *                                             # the board, moves ONE cell into any free neighbor,
+ *                                             # holds (never sends the release), screenshots it
+ *                                             # (phone/screenshots/<timestamp>_mid-hold.png), then
+ *                                             # force-stops the game while still held, restarts,
+ *                                             # taps through the resulting "戰鬥尚未結束" resume
+ *                                             # dialog (Continue), and waits for the board to
+ *                                             # settle again (2nd screenshot: ..._post-continue.png).
+ *                                             # Verified live: the board comes back byte-for-byte
+ *                                             # identical to right before the move — nothing is
+ *                                             # ever committed, so this is a safe repeatable probe
+ *                                             # for "does the kill/restart/resume cycle still work"
+ *                                             # on a real account, independent of solving. Composes
+ *                                             # with --rounds (each round re-probes after reverting).
+ *
+ * Shield overlay (`+` suffix, live 2026-07-10): per-rune status — cannot
+ * dissolve even at a match of 3+, but CAN be picked up and dragged/passed
+ * through freely, and the shield TRAVELS WITH THE RUNE when dragged (User-
+ * confirmed) — NOT positional like sealed columns. Modeled the same way as
+ * the FROZEN ice mechanic (P16): the solver board gets the per-rune FROZEN
+ * value at that cell (never matches, moves/falls normally), while the
+ * display label keeps the real element (`Wood+`). Auto-detected via a
+ * dedicated signature; only confirmed on Wood so far — other elements are
+ * unmeasured (unknown-guard refuses).
+ *
+ * Hurricane zone (`Hurricane` label, live 2026-07-10): an opaque positional
+ * column effect. Its hidden runes cannot dissolve, be picked up, touched,
+ * entered, or passed through. Auto-detected from the neutral-gray cyclone
+ * texture and modeled with NO_DISSOLVE|NO_PICKUP|NO_SWAP on every zone cell.
  *
  * Board file: 5 lines x 6 tokens (comma/space separated). Tokens: w=Water
  * f=Fire g=Wood(green) l=Light d=Dark h=Heart or digits 0-5. Suffixes
@@ -135,12 +194,28 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Board, BoardSimulator, DoraSolver, TargetPlanner, CELL_FLAGS, FROZEN } = require('../algorithm.js');
-const { solveDoraParallel, solveClearAllParallel, solveMaxFirstCombosParallel, defaultWorkers } = require('./parallel.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, CELL_FLAGS, FROZEN, SHIELD_BASE } = require('../algorithm.js');
+const { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, defaultWorkers } = require('./parallel.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
 const ROWS = [1330, 1510, 1690, 1870, 2050];
 const PATCH_HALF = 55, PATCH_STEP = 5;
+
+// --after-spin-kill (2026-07-10): kill+restart+resume trick, verified live.
+// Real TOS package/activity (this device): force-stopping mid-battle and
+// relaunching shows a "戰鬥尚未結束" (battle not ended) resume dialog;
+// tapping Continue reloads the board at its last checkpoint. Verified this
+// checkpoint is BEFORE an in-flight, never-released drag: touch-down + move
+// without ever sending the MaaTouch release, then force-stop while still
+// held, reverted to a byte-for-byte identical board (same HP/CD/currency) —
+// so the safe way to use this trick is to hold, never release, then kill.
+const TOS_PKG = 'com.madhead.tos.zh';
+const TOS_ACTIVITY = 'com.unity3d.player.UnityPlayerActivity';
+// Continue-button tap point, as a FRACTION of screen size (measured live on
+// this 1080x2340 device at (339,1375) — resolution-independent so it survives
+// a different device/DPI). Scaled against a live `adb shell wm size` read.
+const CONTINUE_BUTTON_FRAC = { x: 0.314, y: 0.588 };
+const SCREENSHOT_DIR = path.join(__dirname, 'screenshots');
 
 // --drag-from card geometry (Mi 9T Pro, live-measured 2026-07-10). The 6
 // character cards sit in a row above the board; their horizontal centers
@@ -202,15 +277,55 @@ const SIGNATURES = [
   // solver board instead of a positional flag; the placeholder type here is
   // display-only. Measured live 2026-07-08.
   { type: 1, thorn: false, frozen: true, rgb: [176, 171, 210] },     // Frozen (shell, round 1 of 3)
-  { type: 1, thorn: false, frozen: true, rgb: [178, 112, 123] },     // Frozen Fire shell, 2 rounds left, brighter crystal, live 2026-07-10
-  { type: 1, thorn: true, frozen: true, rgb: [114, 112, 130] },       // Frozen + thorn/fence overlay, live 2026-07-09
-  { type: 1, thorn: true, frozen: true, rgb: [115, 90, 95] },         // Frozen Fire + thorn/fence overlay, 2 rounds left, live 2026-07-10
+  // SOFT-DISABLED 2026-07-10 (live User report, LESSONS L37), NOT deleted —
+  // `disabled:true` makes classify() skip these as match candidates while
+  // keeping the historical rgb/comment, so a future genuine sighting can be
+  // compared against them (and re-enabled by removing the flag) instead of
+  // starting calibration from zero. Both "2 rounds left" entries below sat
+  // closer, by raw-RGB distance, to User-confirmed plain thorn-Water AND
+  // plain thorn-Heart cells (on a board with NO frost active at all,
+  // User-confirmed) than those cells' own correct signatures — misreading 6
+  // live cells as "Fire#" (frozen). `classify()` searches ALL signatures
+  // regardless of the cell's own detected thorn state, so even the
+  // thorn:false entry was reachable for a thorn-darkened cell. Colliding with
+  // two DIFFERENT unrelated confirmed types is strong evidence both samples
+  // were themselves mislabeled plain thorn cells, not real frozen
+  // calibrations — re-verify with the User (not just visual impression, L8)
+  // before re-enabling either.
+  { type: 1, thorn: false, frozen: true, disabled: true, rgb: [178, 112, 123] }, // Frozen Fire shell, 2 rounds left, brighter crystal, live 2026-07-10
+  { type: 1, thorn: true, frozen: true, disabled: true, rgb: [114, 112, 130] },  // Frozen + thorn/fence overlay, live 2026-07-09
+  { type: 1, thorn: true, frozen: true, rgb: [115, 90, 95] },         // Frozen Fire + thorn/fence overlay, 2 rounds left, live 2026-07-10 — NOT shown to collide on today's board (dist ~47-55 from all 6 disputed cells) so left enabled, but shares the same suspect "2 rounds left" provenance and was never independently User-confirmed as frozen; treat a future match with suspicion
   { type: 0, thorn: true, rgb: [70, 98, 119] },    // Water + thorn
   { type: 1, thorn: true, rgb: [129, 61, 53] },    // Fire + thorn
   { type: 2, thorn: true, rgb: [59, 116, 62] },    // Wood + thorn
   { type: 3, thorn: true, rgb: [118, 98, 52] },    // Light + thorn
   { type: 4, thorn: true, rgb: [115, 58, 124] },   // Dark + thorn
   { type: 5, thorn: true, rgb: [140, 79, 113] },   // Heart + thorn
+  // SHIELD overlay (new mechanic, live 2026-07-10, User-stated): a per-cell
+  // status — cannot dissolve even at a match of 3+, but CAN be picked up and
+  // dragged/passed through freely. Structurally identical to the existing
+  // sealed/fence NO_DISSOLVE semantics (P6/P9), just positional-per-rune
+  // instead of whole-column, and confirmed a HARD engine-level block (unlike
+  // the fire-hazard's post-hoc rejection, P23/L34) — reuses CELL_FLAGS
+  // NO_DISSOLVE directly, no new solver semantics needed. Visually: a pale
+  // translucent shield-shaped border + white shamrock watermark over the
+  // base rune; NOT a darkening overlay (measured dark%~1, vs thorn's >20%) so
+  // it doesn't interact with thorn detection. Whole-cell average is stable
+  // and consistent across 3 live cells (101,190,113)/(102,190,113) — a clean
+  // ~104-unit distance from plain Wood, well past MAX_SIG_DIST, so it needs
+  // its own signature entry rather than being recovered via chromaticity.
+  // Only confirmed on Wood so far — shield on other elements is UNMEASURED
+  // (unknown-guard will refuse and print rgb per L8, same as every other
+  // unmeasured variant in this table).
+  { type: 2, thorn: false, shield: true, rgb: [101, 190, 113] }, // Wood + shield
+  // Shield + thorn/fence combo (live 2026-07-10, User-confirmed at (5,1)/
+  // (5,2), both in the sealed edge column): the plain-shield signature above
+  // was ~71 units away (past MAX_SIG_DIST) once thorn-darkened, and the
+  // nearest OTHER match was Water+thorn at dist 40.3 — close enough to be
+  // silently accepted as Water rather than refused. Two live samples
+  // (88,123,93)/(87,123,93) agree tightly, consistent with thorn darkening
+  // the plain-shield rgb by roughly the same ratio seen on other types.
+  { type: 2, thorn: true, shield: true, rgb: [88, 123, 93] }, // Wood + shield + thorn
 ];
 const MAX_SIG_DIST = 60;
 
@@ -299,7 +414,8 @@ const cellUnknown = c => c.dist > (c.edgeNoClear ? MAX_EDGE_HAZARD_DIST : MAX_SI
 const distStr = c => (c.edgeNoClear ? c.dist.toFixed(4) : c.dist.toFixed(0));
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const cellLabel = c => (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.iced ? '~' : '') + (c.frozen ? '#' : '') + (c.noSolvable ? '%' : '') + (c.edgeNoClear ? '$' : '')) + (c.thorn ? '*' : '') + (c.go ? '@' : '');
+const cellLabel = c => c.hurricane ? 'Hurricane'
+  : (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.iced ? '~' : '') + (c.frozen ? '#' : '') + (c.noSolvable ? '%' : '') + (c.edgeNoClear ? '$' : '') + (c.shield ? '+' : '')) + (c.thorn ? '*' : '') + (c.go ? '@' : '');
 
 // ---------- capture + recognition ----------
 
@@ -345,6 +461,52 @@ function cellCornerStats(img, cx, cy) {
     }
   }
   return { rgb: [r / n, g / n, b / n], darkPct: dark / n };
+}
+
+// Hurricane zone (live 2026-07-10): an opaque neutral-gray cyclone with a
+// black center emblem. It occupies a whole column and completely hides the
+// rune underneath. The hidden element is both unreadable and irrelevant:
+// hurricane cells cannot dissolve, be picked up, be entered, or be passed
+// through. Two live captures gave a wide separation from ordinary runes:
+// hurricane grayPct=0.30..0.65 and saturatedPct=0.00..0.04, versus ordinary
+// cells grayPct<=0.06 and saturatedPct>=0.55. Detect the column structurally
+// (>=3 of its 5 cells) and mark all five cells, so one pale rune cannot create
+// a false hurricane and animation at one row cannot make the column flicker.
+function hurricaneOverlayStats(img, cx, cy) {
+  let gray = 0, saturated = 0, n = 0;
+  for (let dy = -70; dy <= 70; dy += 2) {
+    for (let dx = -70; dx <= 70; dx += 2) {
+      const i = img.off + ((cy + dy) * img.w + (cx + dx)) * 4;
+      const r = img.buf[i], g = img.buf[i + 1], b = img.buf[i + 2];
+      const spread = Math.max(r, g, b) - Math.min(r, g, b);
+      const mean = (r + g + b) / 3;
+      n++;
+      if (spread < 28 && mean > 85 && mean < 230) gray++;
+      if (spread > 80) saturated++;
+    }
+  }
+  return { grayPct: gray / n, saturatedPct: saturated / n };
+}
+
+function detectHurricaneColumns(img) {
+  const columns = new Set();
+  for (let gx = 0; gx < 6; gx++) {
+    let hits = 0;
+    for (let gy = 0; gy < 5; gy++) {
+      const s = hurricaneOverlayStats(img, COLS[gx], ROWS[gy]);
+      if (s.grayPct > 0.20 && s.saturatedPct < 0.10) hits++;
+    }
+    if (hits >= 3) columns.add(gx);
+  }
+  return columns;
+}
+
+function hurricaneCell(stats) {
+  return {
+    type: 0, thorn: false, electric: false, iced: false, frozen: false,
+    shield: false, noSolvable: false, edgeNoClear: false, hurricane: true,
+    dist: 0, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct,
+  };
 }
 
 function isGoOverlayStats(stats) {
@@ -490,13 +652,37 @@ function classify(stats, skipGlow = false) {
   }
   let best = null, bestDist = Infinity;
   for (const sig of SIGNATURES) {
+    if (sig.disabled) continue; // see SIGNATURES comment: unconfirmed/retracted entries, kept for history only
     const d = Math.hypot(stats.rgb[0] - sig.rgb[0], stats.rgb[1] - sig.rgb[1], stats.rgb[2] - sig.rgb[2]);
     if (d < bestDist) { bestDist = d; best = sig; }
   }
   // Two independent thorn signals: nearest signature + dark-pixel share (P5).
   // Trust the dark-pixel metric when they disagree.
   const thorn = stats.darkPct > 0.2;
-  return { type: best.type, thorn, electric: best.electric ?? false, iced: best.iced ?? false, frozen: best.frozen ?? false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
+  let type = best.type;
+  // Dark+thorn vs Heart+thorn discriminator (live 2026-07-10, LESSONS L38,
+  // fixed further L39): whole-cell raw-RGB nearest-match is UNRELIABLE for
+  // this specific pair when the race is close. First version of this
+  // override applied UNCONDITIONALLY whenever the raw match landed on either
+  // signature — that regressed 2 live User-confirmed Heart+thorn cells whose
+  // raw distances clearly and correctly favored Heart (dist 7.3 vs 32.7) but
+  // whose g-b (-29) happened to sit just past the -25 cutoff, flipping a
+  // confidently-correct raw match to wrong. Fix: only invoke the g-b
+  // discriminator when the raw race between the two signatures is actually
+  // CLOSE (a real tie), otherwise trust the raw nearest match. Margin=18
+  // chosen from live data: known truly-ambiguous cases had a raw distance
+  // gap of ~10-12 (needed the override), known confidently-correct cases had
+  // a gap of ~23-26 (must NOT be overridden) — wide headroom on both sides.
+  if ((best.type === 4 || best.type === 5) && best.thorn) {
+    const darkSig = SIGNATURES.find(s => s.type === 4 && s.thorn && !s.disabled);
+    const heartSig = SIGNATURES.find(s => s.type === 5 && s.thorn && !s.disabled);
+    const dDark = Math.hypot(stats.rgb[0] - darkSig.rgb[0], stats.rgb[1] - darkSig.rgb[1], stats.rgb[2] - darkSig.rgb[2]);
+    const dHeart = Math.hypot(stats.rgb[0] - heartSig.rgb[0], stats.rgb[1] - heartSig.rgb[1], stats.rgb[2] - heartSig.rgb[2]);
+    if (Math.abs(dDark - dHeart) < 18) {
+      type = (stats.rgb[1] - stats.rgb[2]) < -25 ? 4 : 5;
+    }
+  }
+  return { type, thorn, electric: best.electric ?? false, iced: best.iced ?? false, frozen: best.frozen ?? false, shield: best.shield ?? false, dist: bestDist, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct };
 }
 
 function classifyNormal(stats) {
@@ -552,9 +738,16 @@ function electricBase(imgs, cx, cy) {
   if (g < 1) {                 // green floor -> Dark / Heart / Fire-shock
     // A Fire SHOCK's arc lifts blue over green (green becomes floor) but the
     // residual stays nearly pure red: b/r ~0.04-0.18. Heart sits ~0.47, Dark
-    // ~1.2 — so b/r cleanly separates all three (measured L16).
+    // ~1.2 (original L16 calibration). Cutoff RAISED 0.75->0.95 (live
+    // 2026-07-10, LESSONS L40): a User-confirmed live Heart shock measured
+    // b/r=0.791 and 0.869 across two independent 18-frame captures — both
+    // past the old 0.75 Dark cutoff, misread as Dark both times (consistent,
+    // not flaky). 0.95 keeps clear margin above both live Heart samples while
+    // staying below the original Dark reference (1.2, UNVERIFIED this
+    // session — no live Dark shock was available to re-confirm; re-check if
+    // a Dark shock is ever misread as Heart).
     const br = b / (r || 1);
-    if (br > 0.75) return 4;              // Dark (blue comparable to/above red)
+    if (br > 0.95) return 4;              // Dark (blue comparable to/above red)
     if (br > 0.30) return 5;             // Heart (pink)
     return 1;                            // Fire (red, blue only mildly lifted)
   }
@@ -586,9 +779,10 @@ function noSolvableTypeOverride() {
  * the board the moment ANY cell anywhere looked like an electric candidate
  * (bug found live 2026-07-10 — see LESSONS L32). skipGlow mirrors classify().
  */
-function classifyBoardCell(img, gx, gy, noSolvableType, skipGlow = false) {
+function classifyBoardCell(img, gx, gy, noSolvableType, skipGlow = false, hurricaneColumns = null) {
   const cx = COLS[gx], cy = ROWS[gy];
   const stats = cellStats(img, cx, cy);
+  if (hurricaneColumns && hurricaneColumns.has(gx)) return hurricaneCell(stats);
   let c = classify(stats, skipGlow);
   if (c.dist > MAX_SIG_DIST && isGoOverlayStats(stats)) {
     const edge = classifyGoCoveredCell(cellCornerStats(img, cx, cy));
@@ -658,12 +852,13 @@ function classifyBoardCell(img, gx, gy, noSolvableType, skipGlow = false) {
 function readBoardFromScreen() {
   const img = captureRaw();
   const noSolvableType = noSolvableTypeOverride();
+  const hurricaneColumns = detectHurricaneColumns(img);
   const cells = [];
   let anyCandidate = false;
   for (let gy = 0; gy < 5; gy++) {
     const row = [];
     for (let gx = 0; gx < 6; gx++) {
-      const c = classifyBoardCell(img, gx, gy, noSolvableType);
+      const c = classifyBoardCell(img, gx, gy, noSolvableType, false, hurricaneColumns);
       if (c.electric) anyCandidate = true;
       row.push(c);
     }
@@ -679,8 +874,12 @@ function readBoardFromScreen() {
     // as Fire; 18-20 gives Light g/r ~0.45 vs Fire ~0.11).
     const imgs = [img];
     for (let k = 0; k < 17; k++) imgs.push(captureRaw());
+    const hurricaneColumnsPerFrame = imgs.map(detectHurricaneColumns);
     for (let gy = 0; gy < 5; gy++) {
       for (let gx = 0; gx < 6; gx++) {
+        // The opaque column-level hurricane read outranks transient bright
+        // pixels that can resemble an electric arc in individual frames.
+        if (cells[gy][gx].hurricane) continue;
         const statsPerFrame = imgs.map(im => cellStats(im, COLS[gx], ROWS[gy]));
         const candFrames = statsPerFrame.filter(s => isElectricGlow(s.rgb)).length;
         let maxDelta = 0;
@@ -720,7 +919,7 @@ function readBoardFromScreen() {
             const v = Math.min(statsPerFrame[k].rgb[1], statsPerFrame[k].rgb[2]);
             if (v < bestVal) { bestVal = v; bestIdx = k; }
           }
-          const c = classifyBoardCell(imgs[bestIdx], gx, gy, noSolvableType, true);
+          const c = classifyBoardCell(imgs[bestIdx], gx, gy, noSolvableType, true, hurricaneColumnsPerFrame[bestIdx]);
           c.electric = false; // transient flare suppressed
           cells[gy][gx] = c;
         }
@@ -886,13 +1085,11 @@ function cardDragPrefix(cardIdx, stepsPerCell = STEPS_PER_CELL) {
  * file-redirected `u 0` script (self-exiting), making a stuck touch
  * impossible regardless of what happened to the streaming session.
  */
-async function executeTouchPath(screenPath, stepMs) {
-  // Hygiene: a lingering injector from a killed session could still hold or
-  // replay touch state — clear the field before every drag (root available).
-  try { execSync('adb shell su -c "pkill -f MaaTouch"', { stdio: 'pipe' }); } catch { /* none running */ }
-  const p = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App'], { stdio: ['pipe', 'ignore', 'ignore'] });
-  await sleep(1500); // MaaTouch boot
-  const w = s => p.stdin.write(s + '\n');
+// Paced down+move dispatch shared by executeTouchPath and the
+// --after-spin-kill hold variant below — the deadline/yield pacing (L17) is
+// identical either way; only what happens after the last point differs
+// (release vs. hold-and-kill).
+async function dispatchTouchPath(w, screenPath, stepMs) {
   w(`d 0 ${screenPath[0].x} ${screenPath[0].y} 100`); w('c');
   const t0 = performance.now();
   for (let i = 1; i < screenPath.length; i++) {
@@ -907,6 +1104,17 @@ async function executeTouchPath(screenPath, stepMs) {
     while (performance.now() < deadline) { await new Promise(setImmediate); }
     w(`m 0 ${screenPath[i].x} ${screenPath[i].y} 100`); w('c');
   }
+  return t0;
+}
+
+async function executeTouchPath(screenPath, stepMs) {
+  // Hygiene: a lingering injector from a killed session could still hold or
+  // replay touch state — clear the field before every drag (root available).
+  try { execSync('adb shell su -c "pkill -f MaaTouch"', { stdio: 'pipe' }); } catch { /* none running */ }
+  const p = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  await sleep(1500); // MaaTouch boot
+  const w = s => p.stdin.write(s + '\n');
+  const t0 = await dispatchTouchPath(w, screenPath, stepMs);
   w('u 0'); w('c');
   const dragMs = performance.now() - t0;
   await sleep(2000); // grace: only the 2-line tail can be in flight
@@ -924,6 +1132,101 @@ async function executeTouchPath(screenPath, stepMs) {
   return dragMs;
 }
 
+// ---------- --after-spin-kill: hold-and-revert ----------
+
+function timestampPrefix() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+// Saves under phone/screenshots/<timestamp>_<label>.png (folder created on
+// first use). Kept as its own capture (not reusing capturePng's fixed path)
+// so repeated calls within one run/round don't overwrite each other.
+function saveNamedScreenshot(label) {
+  fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  const outFile = path.join(SCREENSHOT_DIR, `${timestampPrefix()}_${label}.png`);
+  capturePng(outFile);
+  console.log('[TOS] SCREENSHOT=' + outFile);
+  return outFile;
+}
+
+function screenSize() {
+  const out = execSync('adb shell wm size', { stdio: 'pipe' }).toString();
+  const m = out.match(/(\d+)x(\d+)/);
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : { w: 1080, h: 2340 };
+}
+
+function continueTapPoint() {
+  const { w, h } = screenSize();
+  return { x: Math.round(w * CONTINUE_BUTTON_FRAC.x), y: Math.round(h * CONTINUE_BUTTON_FRAC.y) };
+}
+
+/**
+ * Force-stop -> restart -> dismiss the "戰鬥尚未結束" resume dialog -> wait
+ * for the board to reappear. The dialog's appearance time varies (measured
+ * 8-14s live), so instead of a fixed sleep this retaps Continue every ~2.5s
+ * — harmless while the loading screen is still black/transitioning (verified
+ * live: a tap during that window is a no-op) — until the board recognizes as
+ * mostly-known, then hands off to the existing waitForStableBoard() settle
+ * wait. Verified live 2026-07-10: the board this returns to is a byte-for-
+ * byte match of the board right before the kill, PROVIDED the drag that
+ * preceded it was held and never released (see the note at TOS_PKG above).
+ */
+async function killRestartContinue() {
+  console.log('[TOS] AFTER_SPIN_KILL=force-stop');
+  try { execSync(`adb shell am force-stop ${TOS_PKG}`, { stdio: 'pipe' }); } catch { /* best-effort */ }
+  await sleep(1500);
+  console.log('[TOS] AFTER_SPIN_KILL=restart');
+  execSync(`adb shell am start -n ${TOS_PKG}/${TOS_ACTIVITY}`, { stdio: 'pipe' });
+
+  const { x: tapX, y: tapY } = continueTapPoint();
+  const deadline = Date.now() + 45000;
+  let taps = 0;
+  while (Date.now() < deadline) {
+    await sleep(2500);
+    try { execSync(`adb shell input tap ${tapX} ${tapY}`, { stdio: 'pipe' }); } catch { /* best-effort */ }
+    taps++;
+    try {
+      const cells = readBoardFromScreen();
+      const known = cells.flat().filter(c => !cellUnknown(c)).length;
+      if (known >= 25) break; // board is back (allow a couple mid-animation misreads)
+    } catch { /* still on a dialog/loading screen */ }
+  }
+  console.log(`[TOS] AFTER_SPIN_KILL=continue-tapped taps=${taps} point=${tapX},${tapY}`);
+  const cells = await waitForStableBoard();
+  console.log('[TOS] AFTER_SPIN_KILL=reverted');
+  return { cells, taps };
+}
+
+/**
+ * --after-spin-kill: dispatch the drag but NEVER send the release ('u 0') —
+ * hold at the final point, screenshot for the record, then force-stop the
+ * game while still held. Verified live: this is what makes the revert exact
+ * (a completed/released drag's revertibility was NOT tested — see the
+ * conversation notes; holding-then-killing is the confirmed-safe path).
+ */
+async function executeTouchPathAndKill(screenPath, stepMs) {
+  try { execSync('adb shell su -c "pkill -f MaaTouch"', { stdio: 'pipe' }); } catch { /* none running */ }
+  const p = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  await sleep(1500); // MaaTouch boot
+  const w = s => p.stdin.write(s + '\n');
+  const t0 = await dispatchTouchPath(w, screenPath, stepMs);
+  const dragMs = performance.now() - t0;
+
+  await sleep(300); // let the trailing rune visually settle at the held point
+  saveNamedScreenshot('mid-hold');
+
+  console.log('[TOS] AFTER_SPIN_KILL=killing-while-held (no release sent)');
+  try { execSync(`adb shell am force-stop ${TOS_PKG}`, { stdio: 'pipe' }); } catch { /* best-effort */ }
+  try { p.kill(); } catch { /* already gone */ }
+  try { execSync('adb shell su -c "pkill -f MaaTouch"', { stdio: 'pipe' }); } catch { /* none running */ }
+
+  const { taps } = await killRestartContinue();
+  saveNamedScreenshot('post-continue');
+  return { dragMs, taps };
+}
+
 // ---------- recognition check page ----------
 
 function writeCheckHtml(cells, sealedCols, outFile) {
@@ -937,8 +1240,9 @@ function writeCheckHtml(cells, sealedCols, outFile) {
       const c = cells[gy][gx];
       const suspect = cellUnknown(c);
       const left = (COLS[gx] - 90) * SCALE, top = (ROWS[gy] - 90) * SCALE, size = 180 * SCALE;
-      overlays += `<div class="cell${suspect ? ' suspect' : ''}" style="left:${left}px;top:${top}px;width:${size}px;height:${size}px;border-color:${TYPE_CSS[c.type]}">` +
-        `<span style="background:${TYPE_CSS[c.type]}">${TYPE_NAMES[c.type]}${c.electric ? '^' : ''}${c.iced ? '~' : ''}${c.frozen ? '#' : ''}${c.noSolvable ? '%' : ''}${c.edgeNoClear ? '$' : ''}${c.thorn ? '*' : ''}${c.go ? '@' : ''}</span>` +
+      const color = c.hurricane ? '#d8d8d8' : TYPE_CSS[c.type];
+      overlays += `<div class="cell${suspect ? ' suspect' : ''}" style="left:${left}px;top:${top}px;width:${size}px;height:${size}px;border-color:${color}">` +
+        `<span style="background:${color}">${cellLabel(c)}</span>` +
         `<small>d=${distStr(c)}</small></div>`;
     }
   }
@@ -954,7 +1258,7 @@ body{font-family:sans-serif;background:#222;color:#eee;margin:16px}
 .cell.suspect{border-width:6px;border-color:#fff !important;animation:blink .6s infinite alternate}
 @keyframes blink{to{opacity:.3}}
 </style>
-<p>Each box = recognized rune (border color = type, * = thorn). d = color distance
+<p>Each box = recognized rune or blocked hurricane zone (border color = type, * = thorn). d = color distance
 (lower is more confident; blinking white = above threshold ${MAX_SIG_DIST}, unreliable).
 Sealed columns detected: <b>[${sealedCols.join(', ')}]</b></p>
 <div class="wrap"><img src="data:image/png;base64,${b64}"><div class="board">${overlays}</div></div>`;
@@ -973,11 +1277,7 @@ function argValue(flag) {
   return i === -1 ? null : process.argv[i + 1];
 }
 
-// Parse a "col,row" cell argument (x=column 0-5, y=row 0-4) — the same
-// convention the board grid and [TOS] PATH use. Returns {x,y} or null.
-function argCell(flag) {
-  const raw = argValue(flag);
-  if (raw == null) return null;
+function parseCellStr(flag, raw) {
   const parts = String(raw).split(',').map(s => Number(s.trim()));
   if (parts.length !== 2 || !parts.every(Number.isInteger)
       || parts[0] < 0 || parts[0] > 5 || parts[1] < 0 || parts[1] > 4) {
@@ -986,9 +1286,30 @@ function argCell(flag) {
   return { x: parts[0], y: parts[1] };
 }
 
-function parseRuneTypeList(flag) {
+// Parse a "col,row" cell argument (x=column 0-5, y=row 0-4) — the same
+// convention the board grid and [TOS] PATH use. Returns {x,y} or null.
+function argCell(flag) {
+  const raw = argValue(flag);
+  return raw == null ? null : parseCellStr(flag, raw);
+}
+
+// Parse a flag given MULTIPLE times (e.g. --end 3,4 --end 1,2) into an array
+// of {x,y} cells — the held rune must land on ANY ONE of them (2026-07-10,
+// User-requested multi-end support). Returns null if the flag was never
+// given, so callers keep the existing "null = no constraint" convention.
+function argCells(flag) {
+  const raw = [];
+  process.argv.forEach((a, i) => {
+    if (a === flag) { if (process.argv[i + 1] != null) raw.push(process.argv[i + 1]); }
+    else if (a.startsWith(flag + '=')) raw.push(a.slice(flag.length + 1));
+  });
+  return raw.length === 0 ? null : raw.map(s => parseCellStr(flag, s));
+}
+
+function parseRuneTypeList(flag, { allowAll = false } = {}) {
   const raw = argValue(flag);
   if (!raw) return [];
+  if (allowAll && raw.trim().toLowerCase() === 'all') return [0, 1, 2, 3, 4, 5];
   return [...new Set(String(raw).split(',').filter(Boolean).map(s => {
     const tok = s.trim().toLowerCase();
     const t = /^[0-5]$/.test(tok) ? Number(tok)
@@ -1023,6 +1344,7 @@ function askYesNo(msg) {
 async function main() {
   const dry = process.argv.includes('--dry');
   const checkOnly = process.argv.includes('--check');
+  const afterSpinKill = process.argv.includes('--after-spin-kill');
   const boardFile = argValue('--board');
   let rounds = Math.max(1, Math.floor(Number(argValue('--rounds') ?? 1) || 1));
   if ((dry || checkOnly || boardFile) && rounds > 1) {
@@ -1061,15 +1383,61 @@ async function main() {
     cells.forEach((row, gy) => {
       console.log('[TOS] BOARD_ROW' + gy + '=' + row.map(cellLabel).join(','));
     });
+
+    if (afterSpinKill) {
+      // Deliberately ignores every other flag/solver: this is just a probe
+      // for "does the game/board come back cleanly," not a real spin — move
+      // ONE cell into any free neighbor, hold, screenshot, kill, restart
+      // (see executeTouchPathAndKill). Avoids electric/hurricane cells since
+      // touching those can end a drag early or is hard-blocked outright.
+      let from = null, to = null;
+      outer:
+      for (let gy = 0; gy < 5; gy++) {
+        for (let gx = 0; gx < 6; gx++) {
+          if (cells[gy][gx].hurricane || cells[gy][gx].electric) continue;
+          const neighbors = [[gx + 1, gy], [gx, gy + 1], [gx - 1, gy], [gx, gy - 1]]
+            .filter(([nx, ny]) => nx >= 0 && nx < 6 && ny >= 0 && ny < 5);
+          for (const [nx, ny] of neighbors) {
+            if (cells[ny][nx].hurricane || cells[ny][nx].electric) continue;
+            from = { x: gx, y: gy }; to = { x: nx, y: ny };
+            break outer;
+          }
+        }
+      }
+      if (!from) { console.log('[TOS] ABORT=after-spin-kill no movable cell found (no touch sent)'); return; }
+      console.log(`[TOS] AFTER_SPIN_KILL_MOVE=${from.x},${from.y} -> ${to.x},${to.y}`);
+      if (dry) { console.log('[TOS] DRY_RUN=1 (no touch sent)'); return; }
+      const stepsPerCell = Number(argValue('--steps-per-cell') ?? STEPS_PER_CELL);
+      const moveMsArg = argValue('--move-ms');
+      const stepMs = moveMsArg != null ? Number(moveMsArg) / stepsPerCell : Number(argValue('--step-ms') ?? STEP_MS);
+      const screenPath = gridPathToScreenPath([from, to], stepsPerCell);
+      const { dragMs, taps } = await executeTouchPathAndKill(screenPath, stepMs);
+      console.log(`[TOS] SPIN=held-then-killed points=${screenPath.length} moveMs=${(stepMs * stepsPerCell).toFixed(1)} holdMs=${Math.round(dragMs)} continueTaps=${taps}`);
+      continue;
+    }
+
     const elecList = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.electric) elecList.push(`${gx},${gy}`); }));
     if (elecList.length) console.log('[TOS] ELECTRIC_CELLS=' + elecList.join(' ') + ' (row-major; --shock-bases maps in this order)');
     const goCells = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.go) goCells.push({ x: gx, y: gy }); }));
     if (goCells.length) console.log('[TOS] GO_CELLS=' + goCells.map(c => `${c.x},${c.y}`).join(' ') + ' (forced drag start unless --start/--drag-from overrides)');
+    const hurricaneCells = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.hurricane) hurricaneCells.push(`${gx},${gy}`); }));
+    if (hurricaneCells.length) console.log('[TOS] HURRICANE_CELLS=' + hurricaneCells.join(' ')
+      + ' (hard blocked: cannot dissolve, pick up, enter, touch, or pass through)');
     const edgeNoClearCells = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.edgeNoClear) edgeNoClearCells.push(`${gx},${gy}`); }));
-    if (edgeNoClearCells.length) console.log('[TOS] EDGE_NO_CLEAR_CELLS=' + edgeNoClearCells.join(' ') + ' (positional hazard: treated as NO_DISSOLVE)');
+    // {x,y} form for the solver's hazardPositions option (P22, fixed
+    // 2026-07-10, L34): matches form NORMALLY (not structurally excluded —
+    // see the flagGrid comment below for why), and any board where a wave's
+    // dissolve touches one of these positions is rejected as a candidate
+    // final answer, in ALL cascade waves, not just the first.
+    const hazardPositions = edgeNoClearCells.map(s => { const [x, y] = s.split(',').map(Number); return { x, y }; });
+    if (edgeNoClearCells.length) console.log('[TOS] EDGE_NO_CLEAR_CELLS=' + edgeNoClearCells.join(' ') + ' (must never dissolve, any wave — enforced via solver hazardPositions)');
+    const shieldCellsList = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.shield) shieldCellsList.push(`${gx},${gy}`); }));
+    if (shieldCellsList.length) console.log('[TOS] SHIELD_CELLS=' + shieldCellsList.join(' ') + ' (dissolves normally, travels with the rune; solver enforces >=1 shielded rune of each color must survive every wave — not a full freeze, P30)');
     // {x,y} form for the drag-execution dwell logic below (User-reported live
     // 2026-07-10: a hazard cell's rune dissolved during an actual spin even
     // though the PLANNED path was verified safe — BoardSimulator never marks
@@ -1086,7 +1454,7 @@ async function main() {
     // (there: touching is forbidden; here: an off-plan swap risks an
     // accidental match).
     const hazardDwellCells = [];
-    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.edgeNoClear || c.noSolvable) hazardDwellCells.push({ x: gx, y: gy }); }));
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.edgeNoClear || c.noSolvable || c.hurricane) hazardDwellCells.push({ x: gx, y: gy }); }));
     const detectedNoSolvableTypes = [...new Set(cells.flat().filter(c => c.noSolvable).map(c => c.type))];
     let noSolvableTypes = [...new Set([...parseRuneTypeList('--no-solvable'), ...detectedNoSolvableTypes])];
     if (detectedNoSolvableTypes.length > 0) {
@@ -1119,7 +1487,24 @@ async function main() {
     const board = new Board();
     // Frozen runes go onto the solver board as the per-rune FROZEN value: they
     // drag/swap/fall like any rune (ice travels with them) but never match.
-    board.fromArray(cells.map(row => row.map(c => (c.frozen ? FROZEN : c.type))));
+    // Hurricane cells also use the non-element FROZEN sentinel because their
+    // hidden base is unreadable and must not count toward any type totals;
+    // positional flags below additionally make them completely immovable.
+    // Shielded runes (User-confirmed live 2026-07-10: the shield travels WITH
+    // the dragged rune, not the cell) are NOT frozen (bug found + fixed
+    // 2026-07-10, P30/L40 — corrected from the original FROZEN modeling,
+    // which the User confirmed was too strict: "the shielded rune can be
+    // dissolve actually, but we can't dissolve all — if board has zero
+    // shield rune, the card cannot attack"). Encoded as SHIELD_BASE + type
+    // (a 7th-13th board value, same in-band-value trick as FROZEN so it
+    // travels through drag swaps/gravity automatically) — matches and
+    // dissolves completely normally; BoardSimulator.resolve()'s
+    // shieldViolated flags the ONLY forbidden outcome: a color's shielded
+    // count reaching zero. `cells[y][x].type`/label still show the real
+    // element (Wood+) for display; only the SOLVER board substitutes the
+    // shielded value.
+    board.fromArray(cells.map(row => row.map(c =>
+      (c.frozen || c.hurricane) ? FROZEN : (c.shield ? SHIELD_BASE + c.type : c.type))));
 
     // --drag-from N (1-indexed card, 1-6): the drag PHYSICALLY starts by
     // touching card N and dragging it into the board — that action drops a
@@ -1156,9 +1541,25 @@ async function main() {
       if (c.electric) {
         f |= CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
       }
-      if (c.edgeNoClear) {
-        f |= CELL_FLAGS.NO_DISSOLVE;
+      if (c.hurricane) {
+        f |= CELL_FLAGS.NO_DISSOLVE | CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
       }
+      // Shield (P24/P30): NOT modeled with CELL_FLAGS here (positional —
+      // stays with the grid cell, not the rune). User confirmed the shield
+      // travels WITH the specific rune when dragged, so it needs the same
+      // in-band per-rune board-value trick as FROZEN (P16) — but UNLIKE
+      // FROZEN, a shielded rune dissolves completely normally; only the
+      // whole-board "don't drop a color's shield count to zero" rule is
+      // enforced (via SHIELD_BASE, see board.fromArray below).
+      // NOT CELL_FLAGS.NO_DISSOLVE (bug found + fixed 2026-07-10, L34): that
+      // structurally EXCLUDES the cell from ever joining a run, which the
+      // User confirmed live is the WRONG model — the real game lets a run
+      // sweep the hazard cell in along with same-type neighbors (a 4-run
+      // dissolves all 4, hazard cell included) exactly like normal match-3
+      // rules. Enforced instead via the solver's `hazardPositions` option
+      // (see below) — matches form normally, and a board where any wave's
+      // dissolve touches a hazard cell is rejected outright as a candidate
+      // answer, never silently "trimmed" into a smaller safe-looking match.
       if (c.electric || c.iced) {
         priorityCells.push({ x: gx, y: gy });
       }
@@ -1183,7 +1584,10 @@ async function main() {
     // the board there, so the solve must begin there too — it overrides any
     // --start value given (they'd conflict with the one continuous motion).
     let startCell = argCell('--start');
-    const endCell = argCell('--end');
+    // --end may be given multiple times (--end 3,4 --end 1,2): the held rune
+    // must land on ANY ONE of them, and the solver picks whichever qualifying
+    // one scores best (2026-07-10, User-requested).
+    const endCells = argCells('--end');
     if (dragFromCol === null && startCell === null && goCells.length > 0) {
       startCell = goCells[0];
       if (goCells.length > 1) console.log('[TOS] GO_START=multiple detected; using first row-major ' + `${startCell.x},${startCell.y}`);
@@ -1197,12 +1601,12 @@ async function main() {
       startCell = { x: dragFromCol, y: 0 };
     }
     if (startCell && (flagGrid[startCell.y][startCell.x] & (CELL_FLAGS.NO_PICKUP))) {
-      console.log(`[TOS] ABORT=start-unpickable start=${startCell.x},${startCell.y} is electric/locked (NO_PICKUP) — the game can't lift it; pick another --start (no touch sent)`);
+      console.log(`[TOS] ABORT=start-unpickable start=${startCell.x},${startCell.y} is hurricane/electric/locked (NO_PICKUP) — the game can't lift it; pick another --start (no touch sent)`);
       return;
     }
     const startCells = startCell ? [startCell] : null;
-    if (startCell || endCell) {
-      console.log(`[TOS] PIN=start:${startCell ? `${startCell.x},${startCell.y}` : 'any'} end:${endCell ? `${endCell.x},${endCell.y}` : 'any'}`);
+    if (startCell || endCells) {
+      console.log(`[TOS] PIN=start:${startCell ? `${startCell.x},${startCell.y}` : 'any'} end:${endCells ? endCells.map(e => `${e.x},${e.y}`).join('|') : 'any'}`);
     }
     // --fire-route [N]: the drag leaves a fire trail; the last N cells the
     // finger left stay on fire and can't be re-entered (self-avoiding within a
@@ -1273,10 +1677,13 @@ async function main() {
       return;
     }
     if (clearTypes.length > 0) {
-      // Exclude frozen cells: their .type is a display placeholder — on the
-      // solver board they are FROZEN and can never dissolve, so they are not
-      // part of a clear-all demand (they melt in a later round).
-      const totals = clearTypes.map(t => ({ t, n: cells.flat().filter(c => c.type === t && !c.frozen).length }));
+      // Exclude frozen/hurricane cells: their .type is a display placeholder
+      // — on the solver board they are FROZEN and can never dissolve, so
+      // they are not part of a clear-all demand (frozen melts in a later
+      // round). Shielded cells ARE included (P30): they dissolve normally,
+      // same as any other rune of their color — see BoardSimulator.resolve's
+      // shieldViolated for the SEPARATE "not all can dissolve" constraint.
+      const totals = clearTypes.map(t => ({ t, n: cells.flat().filter(c => c.type === t && !c.frozen && !c.hurricane).length }));
       console.log('[TOS] CLEAR_ALL_TARGET=' + totals.map(o => `${TYPE_NAMES[o.t]}:${o.n}`).join(',')
         + ' (strict: thorn-column runes must be dragged out and dissolved)');
       const dead = totals.filter(o => o.n > 0 && o.n < (isTwoMatch(o.t) ? 2 : 3));
@@ -1297,6 +1704,64 @@ async function main() {
           + ' (infeasible type(s) dropped; continuing with remaining constraints)');
       }
     }
+    // --first-wave-have TYPES (or "all"): the first wave must dissolve AT
+    // LEAST ONE rune of EACH listed type (P32, User-requested) — unlike
+    // --clear-all, it doesn't need to clear every rune of the type, just
+    // >=1. If a listed type has too few runes on the board to EVER form a
+    // legal group this round (< 2 for a 2-match type, else < 3), the joint
+    // demand is infeasible for that type this round — same
+    // CLEAR_ALL_INFEASIBLE-style prompt: ask to drop it and continue with
+    // the rest, or abort. The types that ARE achievable this round get a
+    // RESERVE FLOOR (User-specified: "solve max-run combo minus one" — i.e.
+    // never drain below its own min-run threshold): they must not be fully
+    // consumed this wave, so a future spin (once skyfall replenishes the
+    // deficient type) can still satisfy the demand for all of them together.
+    // Only applied when a sibling type actually got dropped — a fully
+    // achievable list has nothing to reserve for.
+    const firstWaveHaveTypes = parseRuneTypeList('--first-wave-have', {allowAll: true});
+    const haveNoConflict = firstWaveHaveTypes.filter(t => firstWaveNoTypes.includes(t));
+    if (haveNoConflict.length > 0) {
+      console.log('[TOS] ABORT=first-wave-have-conflict ' + haveNoConflict.map(t => TYPE_NAMES[t]).join(',')
+        + ' cannot be both --first-wave-have and --first-wave-no in wave 1 (no touch sent)');
+      return;
+    }
+    const haveNoSolveConflict = firstWaveHaveTypes.filter(t => noSolvableTypes.includes(t));
+    if (haveNoSolveConflict.length > 0) {
+      console.log('[TOS] ABORT=no-solvable-conflict ' + haveNoSolveConflict.map(t => TYPE_NAMES[t]).join(',')
+        + ' cannot be both --first-wave-have and --no-solvable (no touch sent)');
+      return;
+    }
+    let reserveTypes = [];
+    if (firstWaveHaveTypes.length > 0) {
+      const haveTotals = firstWaveHaveTypes.map(t => ({t, n: cells.flat().filter(c => c.type === t && !c.frozen && !c.hurricane).length}));
+      console.log('[TOS] FIRST_WAVE_HAVE_TARGET=' + haveTotals.map(o => `${TYPE_NAMES[o.t]}:${o.n}`).join(','));
+      const haveDead = haveTotals.filter(o => o.n < (isTwoMatch(o.t) ? 2 : 3));
+      if (haveDead.length > 0) {
+        const haveDeadDesc = haveDead.map(o => `${TYPE_NAMES[o.t]}=${o.n}`).join(',');
+        console.log('[TOS] FIRST_WAVE_HAVE_INFEASIBLE=' + haveDeadDesc
+          + ' — too few of a type to ever form a dissolve group this round (2-match types need 2, others 3)');
+        const force = process.argv.includes('--force-partial-first-wave-have');
+        const proceed = force || await askYesNo(
+          `[TOS] Continue and solve for the remaining type(s) only (drop ${haveDeadDesc}, preserve the rest for a future round)? [y/N] `);
+        if (!proceed) {
+          console.log('[TOS] ABORT=first-wave-have-infeasible ' + haveDeadDesc + ' (no touch sent)');
+          return;
+        }
+        // A dropped sibling means "have ALL of them this round" is already
+        // unreachable — so the survivors are NOT also held to a mandatory
+        // "clear >=1 this round" demand (that would fight the reserve floor
+        // whenever a survivor's total equals exactly its min-run, e.g. 3
+        // total Water: "clear >=1" wants >=1 gone, "reserve >=3 remaining"
+        // wants 0 gone — a direct contradiction). Reserve floor REPLACES the
+        // have-demand for survivors this round, it doesn't add to it.
+        const haveDeadSet = new Set(haveDead.map(o => o.t));
+        reserveTypes = firstWaveHaveTypes.filter(t => !haveDeadSet.has(t));
+        firstWaveHaveTypes.length = 0;
+        console.log('[TOS] FIRST_WAVE_HAVE_TYPES=none (infeasible type(s) dropped; no wave-1 demand this round — '
+          + (reserveTypes.length ? reserveTypes.map(t => TYPE_NAMES[t]).join(',') : 'remaining type(s)')
+          + ' reserved above their own min-run so a future round can still pair them)');
+      }
+    }
     // --workers N: shard the beam search across worker_threads (phone/
     // parallel.js). Default = cores-1; 1 = exact sequential solve. The beam
     // is PARTITIONED per worker (beamWidth/N each), so results can differ
@@ -1313,7 +1778,7 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstRunes, exactFirstRunes: exactRunesMode,
-        startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
+        startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
     } else if (maxMode) {
@@ -1329,7 +1794,7 @@ async function main() {
         maxPath: Number(argValue('--max-path') ?? 30),
         plannerBeamWidth: Math.max(300, Number(argValue('--beam') ?? 0)),
         plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
-        startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
+        startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       sol = res.solution;
       engine = `MaxFirstCombos(achieved=${res.achieved}/bound=${res.bound})`;
@@ -1340,7 +1805,7 @@ async function main() {
         sealedColumns: sealedCols,
         flags: hasFlags ? flagGrid : null, priorityCells,
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
-        startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
+        startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       engine = 'DoraSolver';
     }
@@ -1351,19 +1816,27 @@ async function main() {
     // constructive coverage planner (which CAN, unlike a wider beam).
     const clearAllMissed = () => {
       if (clearTypes.length === 0) return false;
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
-      const totalsByType = t => board.grid.reduce((n, row) => n + row.filter(v => v === t).length, 0);
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
+      // Count shielded cells of type t too (v === SHIELD_BASE + t) — they're
+      // owed the same as a plain rune of that color (P30: shields dissolve
+      // normally, only "all shielded" per color is forbidden).
+      const totalsByType = t => board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t).length, 0);
       return clearTypes.some(t => sim.firstClearedByType[t] < totalsByType(t));
     };
     const firstWaveNoMissed = () => {
       if (firstWaveNoTypes.length === 0) return false;
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
       return firstWaveNoTypes.some(t => sim.firstClearedByType[t] > 0);
+    };
+    const firstWaveHaveMissed = () => {
+      if (firstWaveHaveTypes.length === 0) return false;
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
+      return firstWaveHaveTypes.some(t => sim.firstClearedByType[t] === 0) || sim.reserveViolated;
     };
 
     // Guarantee escalation: if beam search misses the first-combo target OR a
     // clear-all demand, the planner constructs it (or proves it impossible).
-    if (!maxMode && minFirstRunes === 0 && ((minFirstArg > 0 && missesTarget()) || clearAllMissed() || firstWaveNoMissed())) {
+    if (!maxMode && minFirstRunes === 0 && ((minFirstArg > 0 && missesTarget()) || clearAllMissed() || firstWaveNoMissed() || firstWaveHaveMissed())) {
       // plannerBeam is a CEILING: solveClearAllParallel escalates internally
       // (300 -> 2000 -> 8000 -> ... up to this value), so it stays fast on
       // easy/no-pin cases (L22: routes at 300) while still succeeding on a
@@ -1376,17 +1849,22 @@ async function main() {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
         minFirstCombos: minFirstArg, exact: exactMode,
         beamWidth: plannerBeam, maxPath: plannerMaxPath,
-        startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
+        startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       };
-      // Clear-all coverage targets are independent routing problems — shard
-      // them across the same worker pool; the combo-target planner path
-      // stays sequential (it early-returns on the first routed target).
+      // Clear-all and first-wave-have coverage targets are independent
+      // routing problems — shard them across the same worker pool; the
+      // combo-target planner path stays sequential (it early-returns on the
+      // first routed target).
       const planned = clearTypes.length
         ? await solveClearAllParallel(board, plannerOpts, workers)
-        : new TargetPlanner(board, plannerOpts).solve();
+        : firstWaveHaveTypes.length
+          ? await solveHaveParallel(board, plannerOpts, workers)
+          : new TargetPlanner(board, plannerOpts).solve();
       if (planned.solution) {
         sol = planned.solution;
-        engine = clearTypes.length ? `TargetPlanner(clear-all,combos=${planned.solution.comboCount})` : `TargetPlanner(target#${planned.targetsTried})`;
+        engine = clearTypes.length ? `TargetPlanner(clear-all,combos=${planned.solution.comboCount})`
+          : firstWaveHaveTypes.length ? `TargetPlanner(first-wave-have,combos=${planned.solution.comboCount})`
+          : `TargetPlanner(target#${planned.targetsTried})`;
       } else {
         console.log('[TOS] PLANNER=failed reason=' + planned.reason + (planned.reason === 'routing-failed'
           ? ` (targets exist; escalated routing up to beam=${plannerBeam} maxPath=${plannerMaxPath} (${planned.targetsTried} target-attempts total); retry with --beam ${plannerBeam * 2} and/or --max-path ${plannerMaxPath + 30})`
@@ -1397,16 +1875,78 @@ async function main() {
     console.log(`[TOS] SOLVE ms=${Date.now() - t0} engine=${engine} start=${sol.startX},${sol.startY} moves=${sol.moves.length} first=${sol.firstCombos} firstRunes=${sol.firstRunes} combos=${sol.comboCount} chains=${sol.chains} weight=${sol.score}`);
     console.log('[TOS] PATH=' + sol.path.map(p => `${p.x},${p.y}`).join(' '));
 
+    // Post-drag board (sol.board — the raw arrangement right after the drag
+    // completes, BEFORE any dissolve/gravity). Hazard/no-solvable markers are
+    // POSITIONAL (stay with the cell, not the rune — P9/P22), so they're
+    // read from the ORIGINAL `cells` recognition, not from sol.board itself.
+    // Lets the User visually cross-check the plan against what they observe
+    // in-game before confirming, and self-checks (via the SAME hazardPositions
+    // mechanism the solver itself is gated on, covering EVERY cascade wave,
+    // not just the first) that the plan never dissolves a hazard position —
+    // a WARNING here would mean a real algorithm bug, distinct from a
+    // drag-execution fidelity gap (see PROJECT-FACTS P22/L34).
+    cells.forEach((row, gy) => {
+      console.log('[TOS] BOARD_AFTER_ROW' + gy + '=' + row.map((c, gx) => {
+        if (c.hurricane) return 'Hurricane';
+        const v = sol.board.get(gx, gy);
+        const shielded = v >= SHIELD_BASE;
+        const baseVal = shielded ? v - SHIELD_BASE : v;
+        const t = v === FROZEN ? 'Frozen' : (TYPE_NAMES[baseVal] ?? '?');
+        return t + (shielded ? '+' : '') + (c.edgeNoClear ? '$' : '') + (c.noSolvable ? '%' : '');
+      }).join(','));
+    });
+    const afterSim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
+    const firstWaveCells = afterSim.groups.slice(0, afterSim.firstCombos).flatMap(g => g.cells);
+    console.log('[TOS] FIRST_WAVE_CLEARED=' + firstWaveCells.map(([x, y]) => `${x},${y}`).join(' '));
+    if (afterSim.hazardViolated) {
+      console.log('[TOS] WARNING=this plan dissolves a fire-hazard position in some wave — this should be impossible; please report with this board+path');
+    }
+    if (afterSim.shieldViolated) {
+      console.log('[TOS] WARNING=this plan drops a color\'s shielded-rune count to zero in some wave — this should be impossible; please report with this board+path');
+    }
+    if (shieldCellsList.length) {
+      const shieldTypesPresent = afterSim.shieldTotal.map((n, t) => ({ t, n })).filter(o => o.n > 0);
+      console.log('[TOS] SHIELD_RESULT=' + shieldTypesPresent.map(o => `${TYPE_NAMES[o.t]}:${afterSim.shieldRemaining[o.t]}/${o.n}`).join(',') + (afterSim.shieldViolated ? ' MISS' : ' ok'));
+    }
+    if (afterSim.reserveViolated) {
+      console.log('[TOS] WARNING=this plan drains a --first-wave-have reserve type below its own min-run in some wave — this should be impossible; please report with this board+path');
+    }
+    if (reserveTypes.length) {
+      // remaining = original board count minus everything cleared across all
+      // waves; reserve floor is the type's own min-run (2 for 2-match, else 3).
+      const reserveDetail = reserveTypes.map(t => {
+        const orig = board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t).length, 0);
+        const remaining = orig - afterSim.totalClearedByType[t];
+        return `${TYPE_NAMES[t]}:${remaining}/${isTwoMatch(t) ? 2 : 3}min`;
+      });
+      console.log('[TOS] RESERVE_RESULT=' + reserveDetail.join(',') + ' ' + (afterSim.reserveViolated ? 'MISS' : 'ok'));
+    }
+
+    // General empty-solution guard (P22/L34): unlike the start/end-pin abort
+    // below, this fires even with NO pins set. hazardPositions is enforced
+    // unconditionally now (not an opt-in demand), so it's possible — though
+    // rare — for EVERY reachable arrangement within --max-path to violate it,
+    // leaving no valid answer at all (DoraSolver returns the degenerate
+    // moves=0 solution). Abort rather than send a no-op/undefined drag.
+    if (sol.moves.length === 0 && !startCell && !endCells) {
+      console.log('[TOS] ABORT=no-hazard-safe-path'
+        + (hazardPositions.length > 0 || shieldCellsList.length > 0
+          ? ` — every reachable arrangement within --max-path ${Number(argValue('--max-path') ?? 30)} violates a fire-hazard or shield constraint; try a wider --beam/--max-path`
+          : ' — no valid path found')
+        + ' (no touch sent)');
+      return;
+    }
+
     // Start/end pinning is a hard constraint: if the solver couldn't honor it
     // (end unreachable within --max-path, or nothing to seed), abort rather
     // than spin a path that ignores the pins. Checked before the first-wave
     // aborts so an impossible pin is reported as the root cause.
-    if (startCell || endCell) {
+    if (startCell || endCells) {
       const first = sol.path[0], last = sol.path[sol.path.length - 1];
       const startOk = !startCell || (first.x === startCell.x && first.y === startCell.y);
-      const endOk = !endCell || (last.x === endCell.x && last.y === endCell.y);
+      const endOk = !endCells || endCells.some(e => last.x === e.x && last.y === e.y);
       if (sol.moves.length === 0 || !startOk || !endOk) {
-        console.log(`[TOS] ABORT=start-end required start=${startCell ? `${startCell.x},${startCell.y}` : 'any'} end=${endCell ? `${endCell.x},${endCell.y}` : 'any'} but got start=${first.x},${first.y} end=${last.x},${last.y} moves=${sol.moves.length} — unreachable within --max-path ${Number(argValue('--max-path') ?? 30)} (raise --max-path, or relax --start/--end); no touch sent`);
+        console.log(`[TOS] ABORT=start-end required start=${startCell ? `${startCell.x},${startCell.y}` : 'any'} end=${endCells ? endCells.map(e => `${e.x},${e.y}`).join('|') : 'any'} but got start=${first.x},${first.y} end=${last.x},${last.y} moves=${sol.moves.length} — unreachable within --max-path ${Number(argValue('--max-path') ?? 30)} (raise --max-path, or relax --start/--end); no touch sent`);
         return;
       }
     }
@@ -1417,13 +1957,14 @@ async function main() {
     // board's counts); "trapped" = required runes the drag LEFT in sealed /
     // no-dissolve cells, which is why the demand failed there.
     if (clearTypes.length > 0) {
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
       const detail = [], unmet = [];
       for (const t of clearTypes) {
         let total = 0, trapped = 0;
         for (let y = 0; y < 5; y++) {
           for (let x = 0; x < 6; x++) {
-            if (sol.board.get(x, y) !== t) continue;
+            const v = sol.board.get(x, y);
+            if (v !== t && v !== SHIELD_BASE + t) continue; // shielded runes of type t are owed too (P30)
             total++;
             if (sealedCols.includes(x) || (hasFlags && (flagGrid[y][x] & CELL_FLAGS.NO_DISSOLVE) !== 0)) trapped++;
           }
@@ -1440,7 +1981,7 @@ async function main() {
     }
 
     if (firstWaveNoTypes.length > 0) {
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
       const hit = firstWaveNoTypes
         .map(t => ({ t, n: sim.firstClearedByType[t] }))
         .filter(o => o.n > 0);
@@ -1453,8 +1994,24 @@ async function main() {
       }
     }
 
+    if (firstWaveHaveTypes.length > 0) {
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
+      const missing = firstWaveHaveTypes.filter(t => sim.firstClearedByType[t] === 0);
+      console.log('[TOS] FIRST_WAVE_HAVE_RESULT=' + firstWaveHaveTypes.map(t => `${TYPE_NAMES[t]}:${sim.firstClearedByType[t]}`).join(',')
+        + (missing.length || sim.reserveViolated ? ' MISS' : ' ok'));
+      if (missing.length > 0) {
+        console.log('[TOS] ABORT=first-wave-have ' + missing.map(t => TYPE_NAMES[t]).join(',')
+          + ' not dissolved in wave 1 (no touch sent; try a wider --beam and/or --max-path)');
+        return;
+      }
+      if (sim.reserveViolated) {
+        console.log('[TOS] ABORT=first-wave-have-reserve reserve type drained below its own min-run (no touch sent; try a wider --beam and/or --max-path)');
+        return;
+      }
+    }
+
     if (noSolvableTypes.length > 0) {
-      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes });
+      const sim = BoardSimulator.resolve(sol.board, { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
       const cleared = Array(6).fill(0);
       for (const g of sim.groups) cleared[g.type] += g.cells.length;
       const hit = noSolvableTypes.map(t => ({ t, n: cleared[t] })).filter(o => o.n > 0);
@@ -1510,13 +2067,17 @@ async function main() {
     const screenPath = dragFromCol !== null
       ? [...cardDragPrefix(dragFromCol, stepsPerCell), ...gridPathToScreenPath(sol.path, stepsPerCell, dwellCells)]
       : gridPathToScreenPath(sol.path, stepsPerCell, dwellCells);
+
     const dragMs = await executeTouchPath(screenPath, stepMs);
     console.log(`[TOS] SPIN=done points=${screenPath.length} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} (moveMs excludes corner dwells)`);
 
     // Effect check: a spin should change the board (matches or at least the
     // drag's swaps). Identical board = input was ignored (dialog, enemy
-    // phase, defeat screen) — say so instead of silently moving on.
-    if (!boardFile) {
+    // phase, defeat screen) — say so instead of silently moving on. Grouped
+    // under --no-final (User-requested 2026-07-10): both this and the settle
+    // wait below are POST-spin verification reads, not the spin itself, so
+    // one flag skips all of it for a fast exit.
+    if (!boardFile && !process.argv.includes('--no-final')) {
       await sleep(1200);
       const after = readBoardFromScreen();
       const unchanged = after.every((row, gy) => row.every((c, gx) => cellLabel(c) === cellLabel(cells[gy][gx])));
@@ -1524,7 +2085,7 @@ async function main() {
     }
   }
 
-  if (!dry && !checkOnly && !process.argv.includes('--no-final')) {
+  if (!dry && !checkOnly && !afterSpinKill && !process.argv.includes('--no-final')) {
     console.log('[TOS] WAIT=post-spin settle (cascades/skyfall/attack animations); pass --no-final to skip this report');
     const fin = await waitForStableBoard(30000, !!argValue('--shock-bases'));
     fin.forEach((row, gy) => {

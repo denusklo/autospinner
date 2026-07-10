@@ -7,7 +7,7 @@ Chrome MV3 extension: on the orb-spinning simulator <https://louisalflame.github
 | File | Responsibility | Notes |
 |---|---|---|
 | `algorithm.js` | Pure logic: Board / all Solvers / `BoardSimulator` (exact simulation) / `DoraSolver` (primary engine) | Change this → must run `node verify.js` (hard rule R2) |
-| `verify.js` | Standard regression suite (131 checks, runs directly under Node) | When adding algorithm.js behavior, add a matching check |
+| `verify.js` | Standard regression suite (175 checks, runs directly under Node) | When adding algorithm.js behavior, add a matching check |
 | `content.js` | Browser side: canvas rune reading, mouse event simulation, control panel | Change this → cannot be verified locally, must follow the structured log contract |
 | `popup.html` / `popup.js` | Extension popup UI | Low-risk area |
 | `manifest.json` | MV3 config; content_scripts order is algorithm.js → content.js | Order must not be reversed |

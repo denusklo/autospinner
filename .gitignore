@@ -1,5 +1,6 @@
 phone/screen.raw
 phone/*.png
+phone/screenshots/*.png
 phone/check.html
 phone/spin_script.txt
 .claude/settings.local.json

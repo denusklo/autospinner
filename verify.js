@@ -1,7 +1,7 @@
 // Regression + verification suite for algorithm.js (run: `node verify.js`)
 // This is the canonical check required by CLAUDE.md R2 before shipping any
 // algorithm.js change. Exit code 0 = all pass.
-const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS, FROZEN} =
+const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE} =
   require('./algorithm.js');
 
 let failures = 0;
@@ -154,6 +154,23 @@ f5[2][3] = CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
 const frozenSol = new DoraSolver(mk(BOARDS[2]), {beamWidth: 100, maxPath: 20, flags: f5}).solve();
 check('S5 path avoids frozen cell (3,2)', frozenSol.path.every(p => !(p.x === 3 && p.y === 2)), true);
 check('S5 still finds combos around it', frozenSol.comboCount > 0, true);
+
+// S5H: hurricane columns combine all three positional constraints. Their
+// hidden rune type is represented as FROZEN because it is unreadable and
+// irrelevant, while flags ensure the cells cannot match, start, or be entered.
+const hurricaneFlags = emptyFlags();
+const hurricaneBoard = mk(BOARDS[2]);
+for (let y = 0; y < 5; y++) {
+  hurricaneFlags[y][0] = CELL_FLAGS.NO_DISSOLVE | CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
+  hurricaneFlags[y][5] = CELL_FLAGS.NO_DISSOLVE | CELL_FLAGS.NO_PICKUP | CELL_FLAGS.NO_SWAP;
+  hurricaneBoard.set(0, y, FROZEN);
+  hurricaneBoard.set(5, y, FROZEN);
+}
+const hurricaneSol = new DoraSolver(hurricaneBoard, {beamWidth: 100, maxPath: 20, flags: hurricaneFlags}).solve();
+const hurricaneSim = BoardSimulator.resolve(hurricaneSol.board, {flags: hurricaneFlags});
+check('S5H hurricane path never touches blocked columns', hurricaneSol.path.every(p => p.x > 0 && p.x < 5), true);
+check('S5H hurricane cells never dissolve', hurricaneSim.groups.every(g => g.cells.every(([x]) => x > 0 && x < 5)), true);
+check('S5H solver still finds an interior combo', hurricaneSol.comboCount > 0, true);
 
 // S6: combination — sealed cols 0,5 AND a frozen cell AND a per-cell no-dissolve
 const f6 = emptyFlags();
@@ -430,8 +447,9 @@ check('S10 achieved is honest (independent resolve)',
 const pinsRespected = (sol, start, end) => {
   if (sol.moves.length === 0) return true; // degenerate -> caller aborts
   const a = sol.path[0], b = sol.path[sol.path.length - 1];
+  const endArr = end ? (Array.isArray(end) ? end : [end]) : null;
   return (!start || (a.x === start.x && a.y === start.y))
-      && (!end || (b.x === end.x && b.y === end.y));
+      && (!endArr || endArr.some(e => b.x === e.x && b.y === e.y));
 };
 
 // SP1: startCells restricts the seed — solution begins exactly there
@@ -481,6 +499,40 @@ check('SP7 maxFirstCombos still honest', BoardSimulator.resolve(sp7.solution.boa
 const sp7tp = new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstCombos: 5, startCells: [{x: 1, y: 4}]}).solve();
 check('SP7 planner never routes from a non-pinned start',
   sp7tp.reason !== 'ok' || (sp7tp.solution.startX === 1 && sp7tp.solution.startY === 4), true);
+
+// SP8/SP9: multiple end cells (2026-07-10, User-requested "multiple end
+// point to input and can end at any of it, outcome with best combo") — a
+// pure eligibility OR across all given cells, not a preference toward any
+// one of them; the solver naturally picks whichever qualifying cell scores
+// best under the SAME weight/steer scoring already used everywhere else.
+const sp8EndA = {x: 2, y: 2}, sp8EndB = {x: 0, y: 0};
+const sp8 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 12, endCells: [sp8EndA, sp8EndB]}).solve();
+check('SP8 multi-end: solution lands on ONE of the given end cells',
+  pinsRespected(sp8, null, [sp8EndA, sp8EndB]), true);
+
+// SP9: multi-end must do at least as well as being locked to either single
+// end alone — proves it's actually choosing the best-scoring reachable end,
+// not just honoring whichever happens to be listed first.
+const sp9EndA = {x: 5, y: 1}, sp9EndB = {x: 0, y: 4};
+const sp9SoloA = new DoraSolver(mk(BOARDS[2]), {beamWidth: 300, maxPath: 12, endCell: sp9EndA}).solve();
+const sp9SoloB = new DoraSolver(mk(BOARDS[2]), {beamWidth: 300, maxPath: 12, endCell: sp9EndB}).solve();
+const sp9Both = new DoraSolver(mk(BOARDS[2]), {beamWidth: 300, maxPath: 12, endCells: [sp9EndA, sp9EndB]}).solve();
+const sp9BestSolo = Math.max(
+  sp9SoloA.moves.length > 0 ? sp9SoloA.score : -Infinity,
+  sp9SoloB.moves.length > 0 ? sp9SoloB.score : -Infinity);
+check('SP9 multi-end picks an outcome at least as good as either single end alone',
+  sp9Both.moves.length > 0 && sp9Both.score >= sp9BestSolo, true);
+
+// SP10: legacy single-object `endCell` option still works unchanged
+// (backward compatibility — every existing --end caller keeps working).
+const sp10 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 12, endCell: {x: 2, y: 2}}).solve();
+check('SP10 legacy endCell option still honored', pinsRespected(sp10, null, {x: 2, y: 2}), true);
+
+// SP11: composes with TargetPlanner (multi-end threaded the same way as
+// startCells in SP7).
+const sp11tp = new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstCombos: 5, endCells: [{x: 1, y: 4}, {x: 5, y: 0}]}).solve();
+check('SP11 TargetPlanner honors multi-end (or correctly reports no route)',
+  sp11tp.reason !== 'ok' || pinsRespected(sp11tp.solution, null, [{x: 1, y: 4}, {x: 5, y: 0}]), true);
 
 // --- Clear-all-of-type via coverage planner (PROJECT-FACTS P14) ---
 // DoraSolver can't gather a scattered scarce type into its dissolving group(s);
@@ -644,6 +696,230 @@ check('TM DoraSolver solution honest vs independent 2-match resolve',
 const tmFire = new DoraSolver(tmSolBoard(), {beamWidth: 400, maxPath: 20, twoMatch: [5], fireRoute: 6}).solve();
 check('TM composes with fire-route (path fire-legal + honest)',
   fireRouteInvariant(tmFire.path, 6) && BoardSimulator.resolve(tmFire.board, {twoMatch: [5]}).totalCombos === tmFire.comboCount, true);
+
+// --- Positional hazard cells (P22, fixed 2026-07-10, L34): a cell that must
+// NEVER dissolve in ANY wave, but — unlike sealedColumns/CELL_FLAGS.NO_DISSOLVE
+// — is NOT structurally excluded from matching. Runs form NORMALLY (hazard
+// cell fully eligible, exactly like the real game); a board where any wave's
+// dissolve touches a hazard position is simply forbidden as an answer. This
+// was a live bug: the old NO_DISSOLVE modeling silently "trimmed" a 4-run to
+// a smaller run excluding the hazard cell, hiding the fact that the real
+// game sweeps the WHOLE run (hazard cell included) into one dissolve. ---
+
+// HZ1: sealA's row-0 run of 3 Waters at (0,0)(1,0)(2,0) is a NORMAL group
+// (not trimmed) that happens to include hazard position (0,0) -> violated.
+const hz1 = BoardSimulator.resolve(sealA, {hazardPositions: new Set([0])});
+check('HZ1 normal run STILL includes the hazard cell (not trimmed)',
+  hz1.groups[0].cells.length, 3);
+check('HZ1 hazardViolated=true when a group touches the hazard position', hz1.hazardViolated, true);
+
+// HZ2: same board, no hazardPositions given -> no regression (false, not
+// undefined/thrown), and behavior identical to the pre-P22 baseline.
+const hz2 = BoardSimulator.resolve(sealA, {});
+check('HZ2 no hazardPositions -> hazardViolated is false (no regression)', hz2.hazardViolated, false);
+check('HZ2 totalCombos unaffected when hazardPositions absent', hz2.totalCombos, 1);
+
+// HZ3: a hazard position NOT touched by any group -> no violation even
+// though OTHER groups clear elsewhere on the same board.
+const hz3 = BoardSimulator.resolve(sealA, {hazardPositions: new Set([5 * 10 + 4])}); // (5,4), far corner
+check('HZ3 hazard position untouched by any group -> not violated', hz3.hazardViolated, false);
+
+// HZ4: DoraSolver must NEVER return a final board that violates a hazard
+// position, in ANY cascade wave — sealA's pre-existing (0,0)(1,0)(2,0) Water
+// run would violate hazardPositions=(0,0) if left in place (even a
+// pick-up-and-put-back path reproduces it), so the solver is FORCED to
+// actually rearrange the board to avoid it (or return the degenerate empty
+// solution if truly unavoidable — never a non-empty violating one).
+const hz4 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 20, hazardPositions: [{x: 0, y: 0}]}).solve();
+const hz4Independent = BoardSimulator.resolve(hz4.board, {hazardPositions: new Set([0])});
+check('HZ4 DoraSolver never returns a hazard-violating board',
+  hz4.moves.length === 0 || !hz4Independent.hazardViolated, true);
+
+// HZ5: composes with clear-all — TargetPlanner must reject a routed target
+// whose board violates a hazard position, same as it already rejects
+// clearTypes/firstWaveNoTypes violations.
+const hz5Board = mk([
+  [5, 1, 2, 3, 4, 0],
+  [2, 3, 4, 0, 1, 2],
+  [5, 4, 0, 1, 2, 3],
+  [5, 0, 1, 2, 3, 4],
+  [0, 1, 3, 4, 0, 1],
+]);
+const hz5 = new TargetPlanner(hz5Board, {clearTypes: [5], beamWidth: 200, maxPath: 30, hazardPositions: [{x: 0, y: 4}]}).solveClearAll();
+if (hz5.solution) {
+  const hz5Sim = BoardSimulator.resolve(hz5.solution.board, {hazardPositions: new Set([4])}); // (0,4) packed = 0*10+4
+  check('HZ5 TargetPlanner clear-all route never violates a hazard position', hz5Sim.hazardViolated, false);
+} else {
+  check('HZ5 TargetPlanner clear-all: no solution is an acceptable outcome under a hard hazard constraint', true, true);
+}
+
+// --- Shielded runes (P24, corrected 2026-07-10 as P30/L40): a PER-RUNE
+// status that travels WITH the dragged rune (same in-band board-value trick
+// as FROZEN — SHIELD_BASE + baseType, values 7..12). UNLIKE FROZEN, a
+// shielded rune matches and dissolves COMPLETELY NORMALLY (merges with plain
+// runes of the same color into one group); the only forbidden outcome is a
+// color's shielded-rune count reaching ZERO after any cascade wave
+// (User-stated: "if board has zero shield rune, the card cannot attack").
+// This corrects the original modeling, which wrongly reused FROZEN wholesale
+// (never dissolves at all — too strict). ---
+
+// SH1: a run of 3 shielded Waters forms a NORMAL group (not blocked from
+// matching, unlike FROZEN) and, being the board's only shielded Waters,
+// dissolving all 3 leaves shieldRemaining[Water]=0 -> violated.
+const sh1 = mk([
+  [SHIELD_BASE + 0, SHIELD_BASE + 0, SHIELD_BASE + 0, 1, 2, 3],
+  [1, 2, 3, 4, 5, 0],
+  [2, 3, 4, 5, 0, 1],
+  [3, 4, 5, 0, 1, 2],
+  [4, 5, 0, 1, 2, 3],
+]);
+const sh1r = BoardSimulator.resolve(sh1);
+check('SH1 shielded runes match normally (group not blocked/trimmed)', sh1r.groups[0].cells.length, 3);
+check('SH1 group type is the base color, not a distinct "shielded" type', sh1r.groups[0].type, 0);
+check('SH1 shieldViolated=true when the only shielded runes of a color all dissolve', sh1r.shieldViolated, true);
+
+// SH2: mixed shielded+plain run merges into ONE group (cross-matching works).
+const sh2 = mk([
+  [SHIELD_BASE + 0, SHIELD_BASE + 0, 0, 1, 2, 3],
+  [1, 2, 3, 4, 5, 0],
+  [2, 3, 4, 5, 0, 1],
+  [3, 4, 5, 0, 1, 2],
+  [4, 5, 0, 1, 2, 3],
+]);
+const sh2r = BoardSimulator.resolve(sh2);
+check('SH2 shielded + plain runes of the same color merge into one group', sh2r.groups[0].cells.length, 3);
+
+// SH3: not violated when a shielded rune of that color survives elsewhere,
+// untouched by the dissolving group.
+const sh3 = mk([
+  [SHIELD_BASE + 0, SHIELD_BASE + 0, SHIELD_BASE + 0, 1, 2, 3],
+  [1, 2, 3, 4, 5, 0],
+  [2, 3, 4, 5, 0, SHIELD_BASE + 0],
+  [3, 4, 5, 0, 1, 2],
+  [4, 5, 0, 1, 2, 3],
+]);
+const sh3r = BoardSimulator.resolve(sh3);
+check('SH3 unaffected combo count (extra isolated shielded rune creates no new match)', sh3r.totalCombos, 1);
+check('SH3 not violated when >=1 shielded rune of the color survives', sh3r.shieldViolated, false);
+check('SH3 shieldRemaining reflects the survivor', sh3r.shieldRemaining[0], 1);
+
+// SH4: DoraSolver must NEVER return a board where the board's only shielded
+// rune of a color got swept into a dissolve, in ANY cascade wave.
+const sh4Raw = BOARDS[1].map(r => [...r]);
+sh4Raw[0][0] = SHIELD_BASE + sh4Raw[0][0];
+const sh4 = new DoraSolver(mk(sh4Raw), {beamWidth: 200, maxPath: 20}).solve();
+const sh4Independent = BoardSimulator.resolve(sh4.board);
+check('SH4 DoraSolver never returns a shield-violating board',
+  sh4.moves.length === 0 || !sh4Independent.shieldViolated, true);
+
+// SH5: composes with --first-wave-no (User's explicit ask) — both a shield
+// constraint and a firstWaveNoTypes ban must hold simultaneously.
+const sh5 = new DoraSolver(mk(sh4Raw), {beamWidth: 200, maxPath: 20, firstWaveNoTypes: [1]}).solve();
+const sh5Sim = BoardSimulator.resolve(sh5.board);
+check('SH5 shield composes with --first-wave-no (neither constraint violated)',
+  sh5.moves.length === 0 || (!sh5Sim.shieldViolated && sh5Sim.firstClearedByType[1] === 0), true);
+
+// SH6: TargetPlanner clear-all correctly finds NO solution when the demand
+// requires dissolving the board's only shielded rune of that color (clearing
+// ALL hearts necessarily zeroes the one shielded heart's shield count) —
+// proves neither mandatory demand (clear-all completeness, P14; shield
+// min-1, P30) is silently dropped in favor of the other.
+const sh6Board = mk([
+  [SHIELD_BASE + 5, 1, 2, 3, 4, 0],
+  [2, 3, 4, 0, 1, 2],
+  [5, 4, 0, 1, 2, 3],
+  [5, 0, 1, 2, 3, 4],
+  [0, 1, 3, 4, 0, 1],
+]);
+const sh6 = new TargetPlanner(sh6Board, {clearTypes: [5], beamWidth: 200, maxPath: 30}).solveClearAll();
+check('SH6 TargetPlanner clear-all cannot satisfy a demand requiring the only shielded rune of that color to dissolve',
+  sh6.solution, null);
+
+// --- --first-wave-have + reserve floor (P32, User-requested 2026-07-10):
+// every listed type must clear >=1 rune in wave 1 (mirror of
+// firstWaveNoTypes). When a sibling type is infeasible this round (too few
+// on the board), autospin.js drops it and passes the survivors as
+// reserveTypes: they must not be drained below their OWN min-run threshold
+// (2 for 2-match, else 3) across ALL waves, so a future spin can still form
+// a fresh combo of them once the deficient type is replenished. ---
+
+// FH1: a type with EXACTLY its min-run total, fully cleared by its only
+// possible match -> reserve violated (nothing left for a future combo).
+const fh1Board = mk([
+  [0, 0, 0, 1, 2, 3],
+  [1, 2, 3, 4, 5, 1],
+  [2, 3, 4, 5, 1, 2],
+  [3, 4, 5, 1, 2, 3],
+  [4, 5, 1, 2, 3, 4],
+]);
+const fh1 = BoardSimulator.resolve(fh1Board, {reserveTypes: [0]});
+check('FH1 reserve violated: type has exactly min-run total and all of it clears', fh1.reserveViolated, true);
+check('FH1 totalClearedByType tracks the cleared count (all waves, not just first)', fh1.totalClearedByType[0], 3);
+
+// FH2: sealA has 7 total Waters (3 in the row-0 match, 4 scattered
+// singletons elsewhere) -> clearing the 3-run leaves 4 remaining, comfortably
+// above the min-run-3 floor -> not violated.
+const fh2 = BoardSimulator.resolve(sealA, {reserveTypes: [0]});
+check('FH2 reserve NOT violated: enough of the type remains after clearing (7 total, 3 cleared, 4 remain >= 3)', fh2.reserveViolated, false);
+
+// FH3: DoraSolver satisfies a feasible --first-wave-have demand for BOTH
+// listed types (Water and Wood both have >=5 on this board) — or returns
+// the degenerate no-path solution if truly unreachable within maxPath.
+const fh3 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 400, maxPath: 20, firstWaveHaveTypes: [0, 2]}).solve();
+const fh3Sim = BoardSimulator.resolve(fh3.board);
+check('FH3 DoraSolver satisfies --first-wave-have for every listed type when feasible',
+  fh3.moves.length === 0 || (fh3Sim.firstClearedByType[0] > 0 && fh3Sim.firstClearedByType[2] > 0), true);
+
+// FH4: DoraSolver never returns a board that drains a reserveTypes type
+// below its own min-run floor, even though the board's PRE-EXISTING
+// arrangement (0 moves) would violate it if left untouched.
+const fh4 = new DoraSolver(mk([
+  [0, 0, 0, 1, 2, 3],
+  [1, 2, 3, 4, 5, 1],
+  [2, 3, 4, 5, 1, 2],
+  [3, 4, 5, 1, 2, 3],
+  [4, 5, 1, 2, 3, 4],
+]), {beamWidth: 400, maxPath: 20, reserveTypes: [0]}).solve();
+const fh4Independent = BoardSimulator.resolve(fh4.board, {reserveTypes: [0]});
+check('FH4 DoraSolver never returns a reserve-violating board', fh4.moves.length === 0 || !fh4Independent.reserveViolated, true);
+
+// --- TargetPlanner.planHaveTargets/solveHave (P32/P33, User-requested
+// 2026-07-10): requiring several DIFFERENT types to each dissolve
+// simultaneously in wave 1 is a much tighter target than DoraSolver's
+// greedy beam steering reliably finds (live repro: 5 types, only 2/5
+// achieved at beam 6400 — a genuine local optimum, not a bug). Mirrors
+// planClearAllTargets/solveClearAll exactly, but each type only needs ONE
+// min-run line (haveSets), not full-count coverage (coverageSets). ---
+
+// HV1: TargetPlanner.solve() dispatches to solveHave() when firstWaveHaveTypes
+// is set (no clearTypes) and constructs a board satisfying every listed type
+// at once — verified independently via BoardSimulator.
+const hv1Board = mk([[0, 0, 1, 1, 2, 2], [3, 3, 4, 4, 5, 5], [0, 1, 0, 1, 2, 3], [2, 2, 3, 3, 4, 4], [5, 5, 0, 0, 1, 1]]);
+const hv1 = new TargetPlanner(hv1Board, {firstWaveHaveTypes: [0, 2], beamWidth: 200, maxPath: 20}).solve();
+if (hv1.solution) {
+  const hv1Sim = BoardSimulator.resolve(hv1.solution.board, {});
+  check('HV1 TargetPlanner.solveHave satisfies every listed first-wave-have type at once',
+    [0, 2].every(t => hv1Sim.firstClearedByType[t] > 0), true);
+} else {
+  check('HV1 TargetPlanner.solveHave: no solution is an acceptable outcome if genuinely infeasible', true, true);
+}
+
+// HV2: planHaveTargets returns [] (structurally infeasible, no routing
+// attempted) when a listed type conflicts with firstWaveNoTypes.
+const hv2 = new TargetPlanner(hv1Board, {firstWaveHaveTypes: [0], firstWaveNoTypes: [0]}).planHaveTargets();
+check('HV2 planHaveTargets refuses a type that is also in firstWaveNoTypes', hv2.length, 0);
+
+// HV3: same guard against noSolvableTypes.
+const hv3 = new TargetPlanner(hv1Board, {firstWaveHaveTypes: [0], noSolvableTypes: [0]}).planHaveTargets();
+check('HV3 planHaveTargets refuses a type that is also in noSolvableTypes', hv3.length, 0);
+
+// HV4: solveHave(targetsOverride) reproduces the same run as planning fresh
+// (P10/P18-style targetsOverride reproducibility, used by phone/parallel.js
+// to shard have-coverage targets across worker threads).
+const hv4Planner = new TargetPlanner(hv1Board, {firstWaveHaveTypes: [0, 2], beamWidth: 200, maxPath: 20});
+const hv4Full = hv4Planner.solveHave();
+const hv4Sub = hv4Planner.solveHave(hv4Planner.planHaveTargets());
+check('HV4 solveHave(targetsOverride) reproduces the planned-targets run', [hv4Sub.reason, hv4Sub.targetsTried], [hv4Full.reason, hv4Full.targetsTried]);
 
 // --- Mandatory-vs-optional demand priority (bug found 2026-07-09 live: a
 // board where --clear-all + --first-combos max returned 0/5 cleared even

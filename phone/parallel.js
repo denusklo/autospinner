@@ -25,7 +25,7 @@
 
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const os = require('os');
-const { Board, DoraSolver, TargetPlanner, solveMaxFirstCombos, computeMaxFirstCombosBound, FROZEN } = require('../algorithm.js');
+const { Board, DoraSolver, TargetPlanner, solveMaxFirstCombos, computeMaxFirstCombosBound, FROZEN, SHIELD_BASE } = require('../algorithm.js');
 
 /** Leave one core for the OS/adb; at least 1. Override with --workers. */
 function defaultWorkers() {
@@ -49,7 +49,8 @@ const mergePick = (a, b) => (b !== null && b !== undefined && betterSol(b, a ?? 
 function qualifies(sol, options, clearTypeTotals) {
   if (sol.moves.length === 0) return false;
   const last = sol.path[sol.path.length - 1];
-  if (options.endCell && (last.x !== options.endCell.x || last.y !== options.endCell.y)) return false;
+  const endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
+  if (endCells && !endCells.some(e => last.x === e.x && last.y === e.y)) return false;
   const minC = options.minFirstCombos ?? 0, minR = options.minFirstRunes ?? 0;
   if (minC > 0 && (options.exactFirstCombos ? sol.firstCombos !== minC : sol.firstCombos < minC)) return false;
   if (minR > 0 && (options.exactFirstRunes ? sol.firstRunes !== minR : sol.firstRunes < minR)) return false;
@@ -59,21 +60,29 @@ function qualifies(sol, options, clearTypeTotals) {
   for (const t of options.firstWaveNoTypes ?? []) {
     if ((sol.firstClearedByType[t] ?? 0) > 0) return false;
   }
+  for (const t of options.firstWaveHaveTypes ?? []) {
+    if ((sol.firstClearedByType[t] ?? 0) === 0) return false;
+  }
   return true;
 }
 
 function hasDemands(options) {
   return (options.minFirstCombos ?? 0) > 0 || (options.minFirstRunes ?? 0) > 0
-    || (options.clearTypes ?? []).length > 0 || (options.firstWaveNoTypes ?? []).length > 0;
+    || (options.clearTypes ?? []).length > 0 || (options.firstWaveNoTypes ?? []).length > 0
+    || (options.firstWaveHaveTypes ?? []).length > 0;
 }
 
-// clearTypes is a MANDATORY demand (P14), unlike minFirstCombos/minFirstRunes
-// which are optional targets — mirrors DoraSolver.solve's sc.clearAllOk so a
-// worker's final pick can be classified into the bestClearAllOnly tier when
-// it satisfies clear-all but missed an unreachable combo/rune target.
+// clearTypes and firstWaveHaveTypes are MANDATORY demands (P14/P32), unlike
+// minFirstCombos/minFirstRunes which are optional targets — mirrors
+// DoraSolver.solve's sc.clearAllOk/sc.firstWaveHaveOk so a worker's final
+// pick can be classified into the bestClearAllOnly tier when it satisfies
+// the mandatory demands but missed an unreachable combo/rune target.
 function hardDemandsSatisfied(sol, options, clearTypeTotals) {
   for (const t of options.firstWaveNoTypes ?? []) {
     if ((sol.firstClearedByType[t] ?? 0) > 0) return false;
+  }
+  for (const t of options.firstWaveHaveTypes ?? []) {
+    if ((sol.firstClearedByType[t] ?? 0) === 0) return false;
   }
   const clearTypes = options.clearTypes ?? [];
   for (const t of clearTypes ?? []) {
@@ -163,7 +172,10 @@ async function solveDoraParallel(board, options = {}, workers = defaultWorkers()
   for (let y = 0; y < board.height; y++) {
     for (let x = 0; x < board.width; x++) {
       const v = board.get(x, y);
-      if (v >= 0 && v < FROZEN) clearTypeTotals[v]++;
+      // Shielded runes ARE owed here (P30) — they dissolve normally; only
+      // true FROZEN runes never dissolve and stay un-owed.
+      const bt = v >= SHIELD_BASE ? v - SHIELD_BASE : v;
+      if (bt >= 0 && bt < FROZEN) clearTypeTotals[bt]++;
     }
   }
 
@@ -180,7 +192,7 @@ async function solveDoraParallel(board, options = {}, workers = defaultWorkers()
     if (!r || r.moves.length === 0) continue;
     const sol = reviveBoard(r);
     if (demands && qualifies(sol, opts, clearTypeTotals)) bestQualified = mergePick(bestQualified, sol);
-    else if (((opts.clearTypes ?? []).length > 0 || (opts.firstWaveNoTypes ?? []).length > 0)
+    else if (((opts.clearTypes ?? []).length > 0 || (opts.firstWaveNoTypes ?? []).length > 0 || (opts.firstWaveHaveTypes ?? []).length > 0)
         && hardDemandsSatisfied(sol, opts, clearTypeTotals)) {
       bestHardOnly = mergePick(bestHardOnly, sol);
     } else best = mergePick(best, sol);
@@ -252,6 +264,55 @@ async function solveClearAllParallel(board, plannerOptions = {}, workers = defau
 }
 
 /**
+ * Parallel TargetPlanner.solveHave (P32/P33): same escalating-beam structure
+ * as solveClearAllParallel, but for --first-wave-have's minimal-coverage
+ * targets (ONE min-run line per demanded type, not full-count clearance).
+ * Requiring several DIFFERENT types to each dissolve simultaneously in wave
+ * 1 is a much tighter target than DoraSolver's beam steering reliably finds
+ * (measured live: 5 types, only 2/5 achieved at beam 6400 — a genuine local
+ * optimum) — this constructs the coverage directly instead of hoping the
+ * beam stumbles onto it.
+ */
+async function solveHaveParallel(board, plannerOptions = {}, workers = defaultWorkers()) {
+  const opts = plainOptions(plannerOptions);
+  const planner = new TargetPlanner(board, opts);
+  const targets = planner.planHaveTargets();
+  if (targets.length === 0) return { solution: null, reason: 'no-feasible-target', targetsTried: 0 };
+  const budget = Math.max(planner.maxTargets, 30);
+  const capped = targets.slice(0, budget);
+
+  const ceiling = opts.beamWidth ?? 300;
+  const steps = [...new Set([300, 2000, 8000, 20000].filter(b => b < ceiling)), ceiling];
+
+  let tried = 0;
+  for (const beam of steps) {
+    const stepOpts = { ...opts, beamWidth: beam };
+    if (workers <= 1) {
+      const res = new TargetPlanner(board, stepOpts).solveHave(capped);
+      tried += res.targetsTried;
+      if (res.solution) return { solution: res.solution, reason: 'ok', targetsTried: tried };
+      continue;
+    }
+    const K = Math.min(workers, capped.length);
+    const shards = Array.from({ length: K }, () => []);
+    capped.forEach((t, i) => shards[i % K].push({ index: i, target: t }));
+    const results = await Promise.all(shards.map(shard => runWorker({
+      mode: 'have', boardGrid: board.grid, options: stepOpts, targets: shard,
+    })));
+    let best = null, bestCombos = -1, bestIndex = Infinity;
+    for (const r of results) {
+      tried += r.tried;
+      if (!r.solution) continue;
+      if (r.solution.comboCount > bestCombos || (r.solution.comboCount === bestCombos && r.index < bestIndex)) {
+        best = reviveBoard(r.solution); bestCombos = r.solution.comboCount; bestIndex = r.index;
+      }
+    }
+    if (best) return { solution: best, reason: 'ok', targetsTried: tried };
+  }
+  return { solution: null, reason: 'routing-failed', targetsTried: tried };
+}
+
+/**
  * Parallel replacement for algorithm.js's solveMaxFirstCombos (--first-combos
  * max). Mirrors its bound -> DoraSolver -> TargetPlanner-descent structure
  * exactly (computeMaxFirstCombosBound is the SHARED bound calc, so the two
@@ -269,18 +330,21 @@ async function solveMaxFirstCombosParallel(board, options = {}, workers = defaul
   const sealedColumns = opts.sealedColumns ?? [];
   const flags = opts.flags ?? null;
   const startCells = opts.startCells ?? null;
-  const endCell = opts.endCell ?? null;
+  const endCells = opts.endCells ?? (opts.endCell ? [opts.endCell] : null);
   const fireRoute = opts.fireRoute ?? 0;
   const twoMatch = opts.twoMatch ?? null;
   const clearTypes = opts.clearTypes ?? [];
   const firstWaveNoTypes = opts.firstWaveNoTypes ?? [];
+  const firstWaveHaveTypes = opts.firstWaveHaveTypes ?? [];
+  const reserveTypes = opts.reserveTypes ?? [];
   const noSolvableTypes = opts.noSolvableTypes ?? [];
+  const hazardPositions = opts.hazardPositions ?? null;
   const bound = computeMaxFirstCombosBound(board, opts);
 
   const dora = await solveDoraParallel(board, {
     beamWidth: opts.beamWidth ?? 200, maxPath: opts.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound,
-    priorityCells: opts.priorityCells ?? [], startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
+    priorityCells: opts.priorityCells ?? [], startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
   }, workers);
   let best = dora, achieved = dora.firstCombos;
 
@@ -289,18 +353,20 @@ async function solveMaxFirstCombosParallel(board, options = {}, workers = defaul
       sealedColumns, flags, minFirstCombos: n,
       beamWidth: opts.plannerBeamWidth ?? 300,
       maxPath: opts.plannerMaxPath ?? 60,
-      startCells, endCell, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, noSolvableTypes,
+      startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
     };
     const res = clearTypes.length > 0
       ? await solveClearAllParallel(board, plannerOpts, workers)
-      : new TargetPlanner(board, plannerOpts).solve();
+      : firstWaveHaveTypes.length > 0
+        ? await solveHaveParallel(board, plannerOpts, workers)
+        : new TargetPlanner(board, plannerOpts).solve();
     if (res.solution) { best = res.solution; achieved = n; break; }
   }
   return { solution: best, achieved, bound };
 }
 
 // ---------- worker side ----------
-if (!isMainThread && workerData && (workerData.mode === 'dora' || workerData.mode === 'clear-all')) {
+if (!isMainThread && workerData && (workerData.mode === 'dora' || workerData.mode === 'clear-all' || workerData.mode === 'have')) {
   const board = new Board();
   board.fromArray(workerData.boardGrid);
   if (workerData.mode === 'dora') {
@@ -310,11 +376,13 @@ if (!isMainThread && workerData && (workerData.mode === 'dora' || workerData.mod
   } else {
     // Route this shard's coverage targets; report the shard's best plus the
     // planned index of that target so the master can keep the serial order
-    // preference on combo ties.
+    // preference on combo ties. 'clear-all' (P14, full-count coverage) and
+    // 'have' (P32/P33, one-line-per-type coverage) share this shard loop —
+    // only which TargetPlanner method routes each target differs.
     let best = null, bestCombos = -1, bestIndex = Infinity, tried = 0;
     const planner = new TargetPlanner(board, workerData.options);
     for (const { index, target } of workerData.targets) {
-      const res = planner.solveClearAll([target]);
+      const res = workerData.mode === 'have' ? planner.solveHave([target]) : planner.solveClearAll([target]);
       tried += 1;
       if (!res.solution) continue;
       if (res.solution.comboCount > bestCombos
@@ -329,4 +397,4 @@ if (!isMainThread && workerData && (workerData.mode === 'dora' || workerData.mod
   }
 }
 
-module.exports = { solveDoraParallel, solveClearAllParallel, solveMaxFirstCombosParallel, defaultWorkers };
+module.exports = { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, defaultWorkers };

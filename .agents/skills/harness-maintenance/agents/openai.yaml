@@ -1,0 +1,8 @@
+# Status: SKELETON
+# Purpose/readers/source: UI metadata for the harness-maintenance skill; SKILL.md is authoritative.
+# Remaining: re-check values after SKILL.md is complete.
+# Related: ../SKILL.md
+interface:
+  display_name: "Harness Maintenance"
+  short_description: "Validate and maintain repository Codex harness"
+  default_prompt: "Use $harness-maintenance to validate this repository's Codex harness and report policy drift."

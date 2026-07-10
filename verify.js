@@ -1,7 +1,7 @@
 // Regression + verification suite for algorithm.js (run: `node verify.js`)
 // This is the canonical check required by CLAUDE.md R2 before shipping any
 // algorithm.js change. Exit code 0 = all pass.
-const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, decomposeRearrangement, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap} =
+const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap} =
   require('./algorithm.js');
 
 let failures = 0;
@@ -1477,6 +1477,128 @@ const REA_BOARD = () => mk([
   const sim9 = BoardSimulator.resolve(decomposed9.board.clone());
   const origWaterTotal = board9.grid.reduce((n, row) => n + row.filter(v => v === 0).length, 0);
   check('REA9 clear-all still satisfied on the REAL post-conversion board', sim9.firstClearedByType[0] >= origWaterTotal, true);
+}
+
+// --- RearrangeCoveragePlanner (P52): constructive full/partial-coverage
+// tiling for --rearrange, escalated when RearrangeSolver's swap-beam alone
+// misses a demand (e.g. --first-runes 30, the whole-board-dissolve case a
+// beam search over swaps struggles to stumble onto by chance). ---
+
+// CP1: full-board coverage on an EVENLY-tileable board (5 of each of 6
+// colors on a 5-tall grid: one color per COLUMN is a trivial valid tiling).
+// This is the motivating case (User: "want to solve 30 runes on first
+// wave") — must succeed reliably, not just occasionally.
+{
+  const cpBoard1 = mk([
+    [0, 1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5, 0],
+    [2, 3, 4, 5, 0, 1],
+    [3, 4, 5, 0, 1, 2],
+    [4, 5, 0, 1, 2, 3],
+  ]);
+  const cp1 = new RearrangeCoveragePlanner(cpBoard1, { minFirstRunes: 30, exactFirstRunes: true });
+  const res1 = cp1.solve();
+  check('CP1 full 30-cell coverage found', res1.reason, 'ok');
+  check('CP1 firstRunes reaches the full board', res1.solution && res1.solution.firstRunes, 30);
+  const cp1Sim = BoardSimulator.resolve(res1.solution.board.clone());
+  check('CP1 honest vs independent resolve', cp1Sim.firstRunes, 30);
+}
+
+// CP2: an UNEVEN color distribution (5,6,6,6,4,3) is harder to tile than an
+// even split — proves the multi-restart search (varied direction/color
+// order) actually helps, not just the trivial column case.
+{
+  const cpBoard2 = mk([
+    [0, 0, 1, 1, 2, 2],
+    [0, 3, 3, 1, 2, 4],
+    [0, 3, 3, 1, 2, 4],
+    [0, 3, 3, 1, 2, 4],
+    [5, 5, 5, 1, 2, 4],
+  ]);
+  const cp2 = new RearrangeCoveragePlanner(cpBoard2, { minFirstRunes: 30 });
+  const res2 = cp2.solve();
+  check('CP2 uneven-distribution full coverage found', res2.reason, 'ok');
+  check('CP2 firstRunes reaches the full board', res2.solution && res2.solution.firstRunes, 30);
+}
+
+// CP3: composes with --clear-all — the constructed candidate must actually
+// clear every rune of the required type, verified independently.
+{
+  const cpBoard3 = mk([
+    [4, 1, 0, 3, 2, 5],
+    [1, 4, 0, 3, 2, 5],
+    [0, 1, 4, 3, 2, 5],
+    [3, 0, 1, 4, 2, 5],
+    [2, 3, 0, 1, 4, 5],
+  ]);
+  const cp3 = new RearrangeCoveragePlanner(cpBoard3, { clearTypes: [4], minFirstRunes: 15 });
+  const res3 = cp3.solve();
+  check('CP3 clear-all composition succeeds', res3.reason, 'ok');
+  const cp3Sim = BoardSimulator.resolve(res3.solution.board.clone());
+  const darkTotal = cpBoard3.grid.reduce((n, row) => n + row.filter(v => v === 4).length, 0);
+  check('CP3 ALL darks cleared in wave 1 (independent verify)', cp3Sim.firstClearedByType[4], darkTotal);
+}
+
+// CP4: composes with --first-wave-no — this is the case that caught a real
+// bug during this feature's own development (L57): a color EXCLUDED from
+// deliberate placement is 100% leftover, and a naive leftover-fill can
+// accidentally string 3+ of it together, violating the very demand meant
+// to keep it out of wave 1. Must succeed AND must never let the forbidden
+// color dissolve.
+{
+  const cpBoard4 = mk([
+    [0, 0, 1, 1, 2, 2],
+    [0, 3, 3, 1, 2, 4],
+    [0, 3, 3, 1, 2, 4],
+    [0, 3, 3, 1, 2, 4],
+    [5, 5, 5, 1, 2, 4],
+  ]);
+  const cp4 = new RearrangeCoveragePlanner(cpBoard4, { firstWaveNoTypes: [2], minFirstRunes: 20 });
+  const res4 = cp4.solve();
+  check('CP4 first-wave-no + coverage composition succeeds', res4.reason, 'ok');
+  const cp4Sim = BoardSimulator.resolve(res4.solution.board.clone());
+  check('CP4 forbidden color (Wood) never dissolves in wave 1', cp4Sim.firstClearedByType[2], 0);
+  check('CP4 still reaches the requested coverage', cp4Sim.firstRunes >= 20, true);
+}
+
+// CP5: end-to-end via decomposeRearrangement — the constructed candidate is
+// not just internally consistent, it's REALIZABLE: replaying the decomposed
+// drag sequence from the ORIGINAL board must exactly reproduce it.
+{
+  const cpBoard5 = mk([
+    [0, 1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5, 0],
+    [2, 3, 4, 5, 0, 1],
+    [3, 4, 5, 0, 1, 2],
+    [4, 5, 0, 1, 2, 3],
+  ]);
+  const cp5 = new RearrangeCoveragePlanner(cpBoard5, { minFirstRunes: 30 });
+  const res5 = cp5.solve();
+  const decomposed5 = decomposeRearrangement(cpBoard5, res5.solution.board, res5.solution.movableCells);
+  const replay5 = cpBoard5.clone();
+  for (const d of decomposed5.drags) for (let i = 1; i < d.path.length; i++) replay5.swap(d.path[i - 1].x, d.path[i - 1].y, d.path[i].x, d.path[i].y);
+  let matches5 = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (replay5.get(x, y) !== res5.solution.board.get(x, y)) matches5 = false;
+  check('CP5 coverage-planner candidate is exactly realizable via decomposeRearrangement', matches5, true);
+}
+
+// CP6: an UNSATISFIABLE demand (more than the board can ever provide) must
+// report failure cleanly, never fabricate a false success.
+{
+  const cpBoard6 = mk([
+    [0, 1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5, 0],
+    [2, 3, 4, 5, 0, 1],
+    [3, 4, 5, 0, 1, 2],
+    [4, 5, 0, 1, 2, 3],
+  ]);
+  const cp6 = new RearrangeCoveragePlanner(cpBoard6, { minFirstRunes: 30, exactFirstRunes: true, firstWaveNoTypes: [0, 1] });
+  const res6 = cp6.solve();
+  // With 2 of 6 colors (10 of 30 cells) excluded from wave-1 dissolve,
+  // exactly 30 cleared is structurally impossible — must correctly fail,
+  // not claim success.
+  check('CP6 provably-impossible exact target reported as a miss, not success', res6.reason, 'coverage-search-missed');
+  check('CP6 no solution object on failure', res6.solution, null);
 }
 
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---

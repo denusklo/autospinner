@@ -46,6 +46,21 @@
  *                                                # drag converts its touched cells (the
  *                                                # picked-up rune still never converts);
  *                                                # count may be a number or max/all.
+ *   node phone/autospin.js --rearrange --first-runes 30
+ *                                                # dissolve the WHOLE board in wave 1. If
+ *                                                # RearrangeSolver's swap-beam misses,
+ *                                                # RearrangeCoveragePlanner (P52) escalates
+ *                                                # automatically — it TILES the movable
+ *                                                # region directly (no routing needed, unlike
+ *                                                # single-drag mode: any constructed
+ *                                                # permutation is exactly realizable). Also
+ *                                                # escalates for --clear-all/--first-wave-have/
+ *                                                # --first-combos/--first-attr-combos misses
+ *                                                # under --rearrange. --rearrange-coverage-
+ *                                                # attempts N raises its search budget
+ *                                                # (default 300000) for stubborn boards; a MISS
+ *                                                # is a search-budget report, NOT proof the
+ *                                                # target is impossible.
  *   node phone/autospin.js --first-runes 20      # clear EXACTLY 20 RUNES in the first wave
  *                                                # (楊玉環 "NUM N" boss: read N off the enemy
  *                                                # badge; distinct from combo COUNT)
@@ -229,7 +244,7 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, decomposeRearrangement, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
 const { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, defaultWorkers } = require('./parallel.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
@@ -473,8 +488,16 @@ const MAX_EDGE_HAZARD_DIST = 0.08;
 // game renders Dark's badge with real per-character variance, not one fixed
 // color, hence 3 entries for one type). Wood/Water are inferred from
 // standard icon shape (leaf / wave) but NOT explicitly User-confirmed like
-// Dark was. Fire/Light/Heart are UNMEASURED — the unknown-guard below
-// refuses and prints the measured rgb so entries can be added here.
+// Dark was. Fire/Light added 2026-07-11 (User swapped in Fire/Light cards):
+// live-sampled, stable across 2 captures, icon shape confirms (flame / gold
+// cross matching the board Light rune's own shape). Heart is still UNMEASURED
+// — the unknown-guard below refuses and prints the measured rgb to add it.
+// IMPORTANT (found while adding Fire/Light): Light's rgb sits only 73-76
+// units from BOTH Wood entries below — under the old Wood-only table this
+// would have silently misclassified as Wood (MAX_CARD_SIG_DIST=90). Adding
+// the real Light entry fixes it (exact match, dist=0), but it means this
+// table has little headroom left — if a future card badge classifies as Wood
+// unexpectedly, re-measure it rather than trusting the nearest-match blindly.
 const CARD_SIGNATURES = [
   { type: 4, rgb: [219.7, 141.1, 211.3] }, // Dark (card 1), confirmed
   { type: 4, rgb: [192.0, 110.5, 186.8] }, // Dark (card 4), confirmed
@@ -482,6 +505,8 @@ const CARD_SIGNATURES = [
   { type: 2, rgb: [102.0, 170.5, 51.0] },  // Wood (card 2), inferred from leaf icon
   { type: 2, rgb: [98.3, 165.3, 49.2] },   // Wood (card 3), inferred from leaf icon
   { type: 0, rgb: [77.2, 148.1, 204.4] },  // Water (card 5), inferred from wave icon
+  { type: 1, rgb: [209.8, 88.3, 70.2] },   // Fire (card 3), live 2026-07-11, flame icon
+  { type: 3, rgb: [140.4, 110.2, 25.8] },  // Light (card 4), live 2026-07-11, gold cross icon
 ];
 const MAX_CARD_SIG_DIST = 90; // Dark's own internal spread reaches ~71; cross-type distance is 200+
 const TYPE_NAMES = ['Water', 'Fire', 'Wood', 'Light', 'Dark', 'Heart'];
@@ -2175,29 +2200,77 @@ async function main() {
         twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
         rearrangeBeamWidth, rearrangeMaxSteps,
       });
-      const result = rs.solve();
-      // decomposeRearrangement's returned `board` is the ACTUAL final
-      // arrangement — identical to result.board when convertType is null,
-      // but genuinely DIFFERENT once conversion is active (the first
-      // drag's left-behind cells really did change type). Every field
-      // below is recomputed from THAT board (via RearrangeSolver's own
-      // scoreBoard(), the same weight/combo/first-combos formulas used
-      // everywhere else), not from RearrangeSolver's aspirational target —
-      // otherwise CLEAR_ALL/WANT_GROUP_RESULT/BOARD_AFTER downstream would
-      // silently check an arrangement that no longer exists post-execution.
-      const decomposed = decomposeRearrangement(board, result.board, result.movableCells, convertType, convertCount);
-      rearrangeDrags = decomposed.drags;
-      const finalSc = rs.scoreBoard(decomposed.board);
+      // Missed-demand check, mirroring the single-drag DoraSolver escalation
+      // trigger. MUST run against the REAL final board (post-decompose,
+      // post-conversion), not a candidate's aspirational target board — bug
+      // found live 2026-07-11 (L58): --convert forces some cells to a fixed
+      // type strictly AFTER a candidate is chosen, which can retroactively
+      // BREAK a plan that looked complete before conversion (e.g. a
+      // --first-runes 30 plan hitting exactly 30 pre-conversion, then
+      // dropping to 25 once wood:max overwrote cells that were carrying a
+      // DIFFERENT color's combo). Checking the pre-conversion board made the
+      // escalation trigger silently say "no need to try harder" even though
+      // the ACTUAL outcome missed — so decompose EVERY candidate (both the
+      // swap-beam result and, if needed, the coverage planner's) and check
+      // the true post-conversion board before deciding.
+      const rsClearTotals = t => board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t || v === CURSE_BASE + t).length, 0);
+      const demandMissed = sim =>
+        (minFirstArg > 0 && (exactMode ? sim.firstCombos !== minFirstArg : sim.firstCombos < minFirstArg)) ||
+        (minFirstAttr > 0 && (exactAttrMode ? sim.firstAttrCombos !== minFirstAttr : sim.firstAttrCombos < minFirstAttr)) ||
+        (minFirstRunes > 0 && (exactRunesMode ? sim.firstRunes !== minFirstRunes : sim.firstRunes < minFirstRunes)) ||
+        clearTypes.some(t => sim.firstClearedByType[t] < rsClearTotals(t)) ||
+        firstWaveHaveTypes.some(t => sim.firstClearedByType[t] === 0);
+      const realize = candidateResult => {
+        const decomposed = decomposeRearrangement(board, candidateResult.board, candidateResult.movableCells, convertType, convertCount);
+        const sim = BoardSimulator.resolve(decomposed.board.clone(), { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
+        return {decomposed, sim, missed: demandMissed(sim)};
+      };
+
+      let result = rs.solve();
+      let real = realize(result);
+      let plannerEngine = null;
+      if (real.missed) {
+        const planner = new RearrangeCoveragePlanner(board, {
+          sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes,
+          clearTypes, firstWaveNoTypes, firstWaveHaveTypes, wantGroupType, wantGroupSize,
+          minFirstRunes, exactFirstRunes: exactRunesMode,
+          coverageMaxAttempts: Number(argValue('--rearrange-coverage-attempts') ?? 0) || undefined,
+        });
+        const planned = planner.solve();
+        if (planned.solution) {
+          const plannerReal = realize(planned.solution);
+          // Keep the planner's candidate if it's a genuine improvement (no
+          // longer missing, OR covers more runes even if still short) —
+          // convertType can ALSO disrupt the planner's own tiling, so its
+          // result isn't automatically better; compare real outcomes, not
+          // aspirational ones.
+          if (!plannerReal.missed || plannerReal.sim.firstRunes > real.sim.firstRunes) {
+            result = planned.solution; real = plannerReal;
+            plannerEngine = `RearrangeCoveragePlanner(attempts=${planned.attempts})`;
+          }
+          if (plannerReal.missed) {
+            console.log(`[TOS] PLANNER=${plannerEngine ? 'improved-but-still-short' : 'no-improvement'} constructed tiling still misses the demand after --convert is applied (firstRunes=${plannerReal.sim.firstRunes})`);
+          }
+        } else {
+          console.log(`[TOS] PLANNER=failed reason=${planned.reason} (constructed 1 candidate tiling, ${planned.attempts} backtracking attempts total; NOT a proof of infeasibility — try --rearrange-coverage-attempts for a wider search)`);
+        }
+      }
+      // decomposed/sim now reflect the ACTUAL final board (post-conversion)
+      // for whichever candidate was kept — every field below is recomputed
+      // from THAT board, not an aspirational target, so CLEAR_ALL/
+      // WANT_GROUP_RESULT/BOARD_AFTER downstream never silently check an
+      // arrangement that no longer exists post-execution.
+      rearrangeDrags = real.decomposed.drags;
       sol = {
-        board: decomposed.board, score: finalSc.weight, comboCount: finalSc.comboCount,
-        firstCombos: finalSc.firstCombos, firstAttrCombos: finalSc.firstAttrCombos,
-        firstRunes: finalSc.firstRunes, firstClearedByType: finalSc.firstClearedByType,
-        chains: finalSc.chains,
+        board: real.decomposed.board, score: real.sim.totalCombos * 4, comboCount: real.sim.totalCombos,
+        firstCombos: real.sim.firstCombos, firstAttrCombos: real.sim.firstAttrCombos,
+        firstRunes: real.sim.firstRunes, firstClearedByType: real.sim.firstClearedByType,
+        chains: real.sim.chains,
         moves: rearrangeDrags.length > 0 ? ['rearranged'] : [],
         path: [{x: rearrangeDrags[0]?.startX ?? 0, y: rearrangeDrags[0]?.startY ?? 0}],
         startX: rearrangeDrags[0]?.startX ?? 0, startY: rearrangeDrags[0]?.startY ?? 0,
       };
-      engine = `RearrangeSolver(drags=${rearrangeDrags.length},movable=${result.movableCells.length})`;
+      engine = plannerEngine ?? `RearrangeSolver(drags=${rearrangeDrags.length},movable=${result.movableCells.length})`;
     } else if (minFirstRunes > 0) {
       sol = await solveDoraParallel(board, {
         beamWidth: Number(argValue('--beam') ?? 200),

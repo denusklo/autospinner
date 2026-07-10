@@ -2494,6 +2494,40 @@ class TargetPlanner {
  * disconnected regions, so cross-component rearrangement is impossible by
  * construction, not a search limitation.
  */
+// Connected components of swappable cells (4-directional grid adjacency,
+// restricted to non-NO_SWAP cells). Extracted as a module function (L55-
+// style pure refactor — RearrangeSolver.movableComponents() now delegates
+// here unchanged) so RearrangeCoveragePlanner (P52) can reuse it without
+// needing a RearrangeSolver instance.
+function computeMovableComponents(board, flags) {
+  const w = board.width, h = board.height;
+  const movable = (x, y) => flags === null ? true : (flags[y][x] & CELL_FLAGS.NO_SWAP) === 0;
+  const seen = new Set();
+  const components = [];
+  for (let y0 = 0; y0 < h; y0++) {
+    for (let x0 = 0; x0 < w; x0++) {
+      if (!movable(x0, y0) || seen.has(y0 * w + x0)) continue;
+      const comp = [];
+      const queue = [{x: x0, y: y0}];
+      seen.add(y0 * w + x0);
+      while (queue.length > 0) {
+        const {x, y} = queue.shift();
+        comp.push({x, y});
+        for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          const key = ny * w + nx;
+          if (seen.has(key) || !movable(nx, ny)) continue;
+          seen.add(key);
+          queue.push({x: nx, y: ny});
+        }
+      }
+      components.push(comp);
+    }
+  }
+  return components;
+}
+
 class RearrangeSolver {
   constructor(board, options = {}) {
     this.board = board;
@@ -2518,31 +2552,7 @@ class RearrangeSolver {
    * components of size <2 have nothing to rearrange and are skipped by
    * solve(). @returns {Array<Array<{x,y}>>} */
   movableComponents() {
-    const w = this.board.width, h = this.board.height;
-    const seen = new Set();
-    const components = [];
-    for (let y0 = 0; y0 < h; y0++) {
-      for (let x0 = 0; x0 < w; x0++) {
-        if (!this.movable(x0, y0) || seen.has(y0 * w + x0)) continue;
-        const comp = [];
-        const queue = [{x: x0, y: y0}];
-        seen.add(y0 * w + x0);
-        while (queue.length > 0) {
-          const {x, y} = queue.shift();
-          comp.push({x, y});
-          for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
-            const nx = x + dx, ny = y + dy;
-            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-            const key = ny * w + nx;
-            if (seen.has(key) || !this.movable(nx, ny)) continue;
-            seen.add(key);
-            queue.push({x: nx, y: ny});
-          }
-        }
-        components.push(comp);
-      }
-    }
-    return components;
+    return computeMovableComponents(this.board, this.flags);
   }
 
   /** Score one candidate board via the shared DoraSolver scoring engine.
@@ -2827,6 +2837,339 @@ function decomposeRearrangement(originalBoard, targetBoard, movableCells, conver
 }
 
 /**
+ * Constructive full/partial-coverage planner for 排珠 rearrangement mode
+ * (P52, 2026-07-11, User-requested: "TargetPlanner works for RearrangeSolver
+ * also... so we can achieve --first-runes 30"). Unlike TargetPlanner (single-
+ * drag mode), this planner does NOT need to approximately ROUTE toward a
+ * target — decomposeRearrangement can realize ANY constructed permutation of
+ * a movable component's runes EXACTLY (P50's leaf-pruning guarantee), so the
+ * only real work is CONSTRUCTION: given the runes actually present in a
+ * connected movable component, tile as much of it as possible into valid
+ * same-color runs (>=minRun per color), then verify the assembled candidate
+ * board with an independent BoardSimulator.resolve() against every active
+ * demand — same "construct plausible candidates, verify independently,
+ * reject if it doesn't hold up" discipline as every other planner in this
+ * codebase (TargetPlanner's routeToTarget verification, P14/P32/33).
+ *
+ * Escalation trigger (phone/autospin.js): invoked ONLY when RearrangeSolver's
+ * own beam search over swaps misses an active demand (minFirstCombos/
+ * minFirstAttrCombos/minFirstRunes threshold, clearTypes, firstWaveHaveTypes)
+ * — mirrors the existing single-drag escalation pattern (DoraSolver misses
+ * -> TargetPlanner escalates).
+ *
+ * KNOWN LIMITATIONS (v1, documented rather than silently over-claimed):
+ * - Single DETERMINISTIC construction attempt per call, not an exhaustive
+ *   search over many candidate tilings — `tileComponent`'s backtracking DOES
+ *   explore alternatives internally (bounded by `maxAttempts`) to maximize
+ *   coverage, but the overall planner does not retry with different
+ *   heuristics/orderings if the one candidate it builds fails verification.
+ * - Per-component construction is INDEPENDENT: a clearTypes/firstWaveHave
+ *   demand whose runes are split across multiple disconnected movable
+ *   components (a NO_SWAP wall) is verified GLOBALLY (correctly rejected if
+ *   truly unsatisfiable) but not jointly OPTIMIZED across components — each
+ *   component just greedily maximizes its own coverage, biased to prioritize
+ *   clearTypes/firstWaveHaveTypes colors first when choosing what to place.
+ * - exactFirstRunes with a target BELOW the full board size is not
+ *   specifically aimed for (the tiler maximizes coverage, which can overshoot
+ *   a below-maximum exact target) — fails safe (verification correctly
+ *   rejects overshoot) but won't succeed in that specific case in v1. At the
+ *   board's own cell count (e.g. --first-runes 30 on a 30-cell board) there
+ *   is no overshoot possible, so this gap doesn't affect the motivating case.
+ * - `reason: 'coverage-search-missed'` means the ONE constructed candidate
+ *   didn't verify — NOT a proof of infeasibility (unlike TargetPlanner's
+ *   'no-feasible-target', which IS a proof). Don't conflate the two in UX
+ *   copy; see phone/autospin.js's escalation-failure log wording.
+ * - priorityCells (DoraSolver's first-wave-priority weight bonus, used for
+ *   electric/iced runes) is not threaded through --rearrange at all yet (a
+ *   pre-existing P50 gap, not new to this planner) — not addressed here.
+ */
+class RearrangeCoveragePlanner {
+  constructor(board, options = {}) {
+    this.board = board;
+    this.sealedColumns = options.sealedColumns ?? [];
+    this.flags = options.flags ?? null;
+    this.twoMatch = options.twoMatch ?? null;
+    this.noSolvableTypes = [...new Set(options.noSolvableTypes ?? [])];
+    this.firstWaveNoTypes = [...new Set(options.firstWaveNoTypes ?? [])];
+    this.firstWaveHaveTypes = [...new Set(options.firstWaveHaveTypes ?? [])];
+    this.reserveTypes = [...new Set(options.reserveTypes ?? [])];
+    this.clearTypes = [...new Set(options.clearTypes ?? [])];
+    this.hazardPositions = options.hazardPositions
+      ? new Set(options.hazardPositions.map(p => p.x * 10 + p.y)) : null;
+    this.wantGroupType = options.wantGroupType ?? null;
+    this.wantGroupSize = options.wantGroupSize ?? 0;
+    this.minFirstRunes = options.minFirstRunes ?? 0;
+    this.exactFirstRunes = options.exactFirstRunes ?? false;
+    // Default raised 50000->300000 after live testing (L57): an uneven
+    // color distribution (5,6,6,6,4,3 across 30 cells) needed up to ~730K
+    // attempts on an unlucky restart, but as few as ~24K on a lucky one —
+    // search speed is ~1us/attempt (measured), so 300000 stays well under
+    // a second even in the worst observed case, while catching meaningfully
+    // harder boards than the original budget could.
+    this.maxAttempts = options.coverageMaxAttempts ?? 300000;
+    this.verbose = options.verbose ?? false;
+
+    this.clearTypeTotals = Array(6).fill(0);
+    if (this.clearTypes.length > 0) {
+      for (let y = 0; y < board.height; y++) {
+        for (let x = 0; x < board.width; x++) {
+          const bt = baseType(board.get(x, y));
+          if (bt >= 0 && bt < FROZEN) this.clearTypeTotals[bt]++;
+        }
+      }
+    }
+  }
+
+  flag(x, y) { return this.flags === null ? 0 : this.flags[y][x]; }
+  dissolvable(x, y) { return !this.sealedColumns.includes(x) && (this.flag(x, y) & CELL_FLAGS.NO_DISSOLVE) === 0; }
+  minRunOf(t) { return this.twoMatch && [...this.twoMatch].includes(t) ? 2 : 3; }
+
+  /** Priority order for trying colors at each cell: clearTypes first (need
+   * FULL consumption, so use them eagerly), then firstWaveHaveTypes (need
+   * >=1 placed), then everything else — the "rest" bucket is shuffled per
+   * `seed` (Fisher-Yates over a seeded LCG, so restarts in solve() get
+   * genuinely different orderings without touching Math.random, keeping
+   * the whole planner deterministic given a seed). Heuristic ordering, not
+   * a guarantee — see class doc's KNOWN LIMITATIONS. */
+  colorTryOrder(seed = 0) {
+    const priority = [...this.clearTypes, ...this.firstWaveHaveTypes.filter(t => !this.clearTypes.includes(t))];
+    const rest = [0, 1, 2, 3, 4, 5].filter(t => !priority.includes(t));
+    let s = seed + 1;
+    const rand = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    for (let i = rest.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [rest[i], rest[j]] = [rest[j], rest[i]];
+    }
+    return [...priority, ...rest];
+  }
+
+  /**
+   * Backtracking tiler for ONE connected movable component. The FIRST
+   * uncovered cell in row-major scan order can only be covered by a shape
+   * where it is that shape's OWN row-major-earliest cell (any shape using
+   * earlier cells would need them still uncovered, contradicting "first
+   * uncovered") — so only two DIRECTIONS need trying per cell (rightward,
+   * downward), each tried at two LENGTHS per usable color: the color's own
+   * minRun, and however much of that color's remaining supply the eligible
+   * strip can hold (so a count that isn't a multiple of minRun, e.g. 5
+   * remaining with minRun=3, can still be fully consumed by one 5-run
+   * instead of stranding a leftover 2).
+   * Depth-first with an early exit once `target` cells are covered, and a
+   * hard `maxAttempts` DFS-call budget as a safety valve on boards where no
+   * good tiling is quickly reachable. `dirOrder`/`colorOrder` let `solve()`
+   * run several DIFFERENTLY-ORDERED restarts (see solve()'s doc) — a fixed
+   * "always try rightward before downward" order can exhaustively fail
+   * every row-based tiling attempt (burning the whole attempts budget on
+   * dead ends) before ever trying a column-based one that would succeed
+   * immediately; e.g. 5-per-color on a 5-tall board tiles trivially as one
+   * color per COLUMN, but a right-first search may never reach it in
+   * budget. Caught live in this project's own pre-ship testing (L57).
+   * @returns {{covered: Map<cellKey, type>|null, coveredCount: number,
+   *   attempts: number}} cellKey = x*10+y (matches this file's existing
+   *   hazardPositions/curse convention); a covered value of -1 means "left
+   *   as original, not part of any planned run".
+   */
+  tileComponent(dissolvableCells, availCounts, dirOrder = [[1, 0], [0, 1]], colorOrder = null) {
+    const w = this.board.width, h = this.board.height;
+    const eligible = new Set(dissolvableCells.map(c => c.x * 10 + c.y));
+    const remaining = availCounts.slice();
+    const covered = new Map();
+    const sorted = [...dissolvableCells].sort((a, b) => a.y - b.y || a.x - b.x);
+    if (colorOrder === null) colorOrder = this.colorTryOrder();
+    const target = Math.min(this.minFirstRunes || Infinity, dissolvableCells.length);
+    let attempts = 0;
+    let best = null, bestCount = -1;
+
+    const inEligible = (x, y) => eligible.has(x * 10 + y) && !covered.has(x * 10 + y);
+    const usableColor = t => !this.firstWaveNoTypes.includes(t) && !this.noSolvableTypes.includes(t);
+    const firstUncovered = () => sorted.find(c => !covered.has(c.x * 10 + c.y)) ?? null;
+    const coveredCountNow = () => { let n = 0; for (const v of covered.values()) if (v !== -1) n++; return n; };
+    const recordIfBest = () => {
+      const n = coveredCountNow();
+      if (n > bestCount) { bestCount = n; best = new Map(covered); }
+      return n;
+    };
+
+    const dfs = () => {
+      attempts++;
+      if (attempts > this.maxAttempts) return;
+      const cell = firstUncovered();
+      if (cell === null) { recordIfBest(); return; }
+      if (recordIfBest() >= target) return;
+      for (const dir of dirOrder) {
+        // Full eligible strip from `cell` in this direction (not capped at
+        // 3) — needed so a color can be placed as a run LONGER than its own
+        // minRun when that's what actually consumes its remaining supply
+        // cleanly (see the two-length-candidate loop below).
+        const strip = [];
+        for (let k = 0; ; k++) {
+          const nx = cell.x + dir[0] * k, ny = cell.y + dir[1] * k;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h || !inEligible(nx, ny)) break;
+          strip.push({x: nx, y: ny});
+        }
+        for (const t of colorOrder) {
+          if (!usableColor(t)) continue;
+          const need = this.minRunOf(t);
+          if (strip.length < need || remaining[t] < need) continue;
+          // Two length candidates: the type's OWN minRun (current behavior),
+          // and "consume everything this color has left" (fixes the common
+          // case of a remaining count that ISN'T a multiple of minRun — a
+          // board with exactly 5 of a color and minRun=3 could only place
+          // ONE 3-run and strand 2 leftover cells forever; a single 5-run
+          // uses all 5 cleanly, since any run length >=minRun is a valid
+          // dissolving group). Set dedups when they're equal.
+          const maxLen = Math.min(strip.length, remaining[t]);
+          // maxLen FIRST (L57): for full-coverage tiling, consuming ALL
+          // remaining supply of a color in one run is almost always better
+          // than the minimum-length run — trying `need` first commits to a
+          // short run and recurses deep into that choice (leaving an
+          // unusable remainder for THIS color) before ever backtracking to
+          // try the clean maxLen alternative, which can exhaust the whole
+          // attempts budget on the worse option first.
+          for (const len of new Set([maxLen, need])) {
+            const shape = strip.slice(0, len);
+            shape.forEach(p => covered.set(p.x * 10 + p.y, t));
+            remaining[t] -= len;
+            dfs();
+            shape.forEach(p => covered.delete(p.x * 10 + p.y));
+            remaining[t] += len;
+            if (attempts > this.maxAttempts || bestCount >= target) return;
+          }
+        }
+      }
+      covered.set(cell.x * 10 + cell.y, -1);
+      dfs();
+      covered.delete(cell.x * 10 + cell.y);
+    };
+
+    dfs();
+    return {covered: best, coveredCount: Math.max(bestCount, 0), attempts};
+  }
+
+  /**
+   * Construct one candidate board covering every movable component, then
+   * verify it independently via BoardSimulator.resolve against every active
+   * demand.
+   * @returns {{solution: {board, score, comboCount, firstCombos,
+   *   firstAttrCombos, firstRunes, firstClearedByType, chains,
+   *   movableCells}|null, reason: 'ok'|'coverage-search-missed',
+   *   attempts: number}}
+   */
+  solve() {
+    const components = computeMovableComponents(this.board, this.flags);
+    const candidate = this.board.clone();
+    const movableCells = components.flat();
+    let totalAttempts = 0;
+
+    // Direction/color-order restarts (L57): a single fixed exploration
+    // order can exhaustively fail every tiling reachable in that order
+    // (burning the whole attempts budget) before ever trying an order that
+    // succeeds immediately — e.g. always-rightward-first search can miss a
+    // trivial one-color-per-COLUMN tiling. Each restart gets an even slice
+    // of maxAttempts (so total work stays bounded); stops early the moment
+    // any restart reaches full target coverage.
+    const RESTART_DIR_ORDERS = [[[1, 0], [0, 1]], [[0, 1], [1, 0]]];
+    const RESTART_SEEDS = [0, 1, 2, 3, 4, 5];
+    const restarts = [];
+    for (const dirOrder of RESTART_DIR_ORDERS) for (const seed of RESTART_SEEDS) restarts.push({dirOrder, seed});
+    const perRestartBudget = Math.max(1000, Math.floor(this.maxAttempts / restarts.length));
+
+    for (const comp of components) {
+      if (comp.length < 3) continue; // can't form any run here regardless
+      const dissolvableCells = comp.filter(c => this.dissolvable(c.x, c.y));
+      const availCounts = Array(6).fill(0);
+      for (const c of comp) {
+        const bt = baseType(this.board.get(c.x, c.y));
+        if (bt >= 0 && bt < FROZEN) availCounts[bt]++;
+      }
+      const target = Math.min(this.minFirstRunes || Infinity, dissolvableCells.length);
+      const savedMaxAttempts = this.maxAttempts;
+      this.maxAttempts = perRestartBudget;
+      let covered = null, bestCoveredCount = -1, componentAttempts = 0;
+      for (const {dirOrder, seed} of restarts) {
+        const colorOrder = this.colorTryOrder(seed);
+        const attempt = this.tileComponent(dissolvableCells, availCounts, dirOrder, colorOrder);
+        componentAttempts += attempt.attempts;
+        if (attempt.coveredCount > bestCoveredCount) { bestCoveredCount = attempt.coveredCount; covered = attempt.covered; }
+        if (bestCoveredCount >= target) break;
+      }
+      this.maxAttempts = savedMaxAttempts;
+      const attempts = componentAttempts;
+      totalAttempts += attempts;
+      if (!covered) continue; // nothing placeable in this component; leave as-is
+
+      const leftoverCounts = availCounts.slice();
+      const assignedCells = new Set();
+      for (const [key, t] of covered) {
+        if (t === -1) continue;
+        const x = Math.floor(key / 10), y = key % 10;
+        candidate.set(x, y, t);
+        assignedCells.add(key);
+        leftoverCounts[t]--;
+      }
+      // Greedy geometric anti-adjacency leftover fill (L57 — a round-robin
+      // fill was tried first and FAILED live in this project's own testing:
+      // a firstWaveNoTypes color, being 100% excluded from deliberate
+      // placement, ends up as the OVERWHELMING majority of the leftover
+      // pool once other leftover types run out, and round-robin naturally
+      // goes monotone at the tail — worse, `comp`'s array order comes from
+      // BFS traversal, not row-major, so "adjacent in the array" doesn't
+      // even mean "adjacent on the board", making interleaving by array
+      // position meaningless as an anti-adjacency defense in the first
+      // place). Fixed by checking REAL board (x,y) adjacency: process
+      // leftover cells in row-major order, and for each one pick any pool
+      // type that would NOT complete a run of length >= that type's own
+      // minRun with cells already placed (deliberately-tiled OR earlier-
+      // filled-leftover) immediately left/right/up/down of it.
+      const leftoverCells = comp.filter(c => !assignedCells.has(c.x * 10 + c.y))
+        .sort((a, b) => a.y - b.y || a.x - b.x);
+      const pool = [];
+      for (let t = 0; t < 6; t++) for (let n = 0; n < leftoverCounts[t]; n++) pool.push(t);
+      const w2 = this.board.width, h2 = this.board.height;
+      const runLenFrom = (x, y, dx, dy, t) => {
+        let n = 0, cx = x - dx, cy = y - dy;
+        while (cx >= 0 && cx < w2 && cy >= 0 && cy < h2 && candidate.get(cx, cy) === t) { n++; cx -= dx; cy -= dy; }
+        return n;
+      };
+      for (const c of leftoverCells) {
+        let chosenIdx = 0; // fallback if no safe choice exists (rare)
+        for (let i = 0; i < pool.length; i++) {
+          const t = pool[i];
+          const need = this.minRunOf(t);
+          const horiz = 1 + runLenFrom(c.x, c.y, 1, 0, t) + runLenFrom(c.x, c.y, -1, 0, t);
+          const vert = 1 + runLenFrom(c.x, c.y, 0, 1, t) + runLenFrom(c.x, c.y, 0, -1, t);
+          if (horiz < need && vert < need) { chosenIdx = i; break; }
+        }
+        const t = pool.splice(chosenIdx, 1)[0];
+        candidate.set(c.x, c.y, t);
+      }
+    }
+
+    const sim = BoardSimulator.resolve(candidate, {
+      sealedColumns: this.sealedColumns, flags: this.flags, twoMatch: this.twoMatch,
+      noSolvableTypes: this.noSolvableTypes, hazardPositions: this.hazardPositions,
+      reserveTypes: this.reserveTypes.length > 0 ? this.reserveTypes : null,
+    });
+    const ok = !sim.hazardViolated && !sim.shieldViolated && !sim.reserveViolated && !sim.curseViolated
+      && this.clearTypes.every(t => sim.firstClearedByType[t] >= this.clearTypeTotals[t])
+      && this.firstWaveNoTypes.every(t => sim.firstClearedByType[t] === 0)
+      && this.firstWaveHaveTypes.every(t => sim.firstClearedByType[t] > 0)
+      && (this.minFirstRunes === 0 || (this.exactFirstRunes ? sim.firstRunes === this.minFirstRunes : sim.firstRunes >= this.minFirstRunes));
+
+    if (!ok) return {solution: null, reason: 'coverage-search-missed', attempts: totalAttempts};
+    return {
+      solution: {
+        board: candidate, score: sim.totalCombos * 4, comboCount: sim.totalCombos,
+        firstCombos: sim.firstCombos, firstAttrCombos: sim.firstAttrCombos,
+        firstRunes: sim.firstRunes, firstClearedByType: sim.firstClearedByType,
+        chains: sim.chains, movableCells,
+      },
+      reason: 'ok', attempts: totalAttempts,
+    };
+  }
+}
+
+/**
  * Find the MAXIMUM achievable first-wave combo count on a board (P10):
  * upper-bound it from movable rune counts and resolvable-cell geometry, take
  * the DoraSolver result as the baseline, then let TargetPlanner construct
@@ -2901,5 +3244,5 @@ function solveMaxFirstCombos(board, options = {}) {
 
 // Export for use in content script
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, decomposeRearrangement, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap};
+  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap};
 }

@@ -610,9 +610,19 @@ function captureRaw() {
   return { buf, w, h, off };
 }
 
+// `adb exec-out` streams the PNG straight to stdout in ONE adb invocation —
+// unlike `adb shell screencap -p <path>` + a separate `adb pull` (two full
+// adb round-trips: device-side write, then a separate transfer), this skips
+// the on-device file entirely (bug found + fixed 2026-07-12, L65: the old
+// two-step approach was the main cost of --screenshot-after-spin's hold
+// time). `exec-out` (unlike plain `adb shell`) does not allocate a PTY, so
+// binary output isn't corrupted by newline translation — no encoding needs
+// to be passed to execSync, so it returns a raw Buffer, written to outFile
+// as-is. maxBuffer raised well above the default 1MB (a screenshot PNG can
+// exceed that).
 function capturePng(outFile) {
-  execSync('adb shell screencap -p /sdcard/tos_screen.png');
-  execSync(`adb pull /sdcard/tos_screen.png "${outFile}"`, { stdio: 'pipe' });
+  const buf = execSync('adb exec-out screencap -p', { maxBuffer: 64 * 1024 * 1024 });
+  fs.writeFileSync(outFile, buf);
 }
 
 function cellStats(img, cx, cy, half = PATCH_HALF, step = PATCH_STEP) {

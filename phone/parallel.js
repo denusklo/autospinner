@@ -25,7 +25,7 @@
 
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const os = require('os');
-const { Board, BoardSimulator, DoraSolver, TargetPlanner, solveMaxFirstCombos, computeMaxFirstCombosBound, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, computeMovableComponents, enumerateConversionCandidates, buildConvertedBoard, applyDragSwap, solveMaxFirstCombos, computeMaxFirstCombosBound, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
 
 /** Leave one core for the OS/adb; at least 1. Override with --workers. */
 function defaultWorkers() {
@@ -216,9 +216,216 @@ async function solveDoraParallel(board, options = {}, workers = defaultWorkers()
   return finalize();
 }
 
+// Shared demand-check for the rearrange-convert-aware candidate loop —
+// duplicated intentionally (not imported from algorithm.js, which stays
+// browser-pure and has no worker-boundary concerns) but kept byte-identical
+// to solveRearrangeConvertAware's own `demandMissed` closure so master and
+// worker never drift.
+function rearrangeConvertDemandMissed(sim, opts, clearTotals) {
+  return ((opts.minFirstCombos ?? 0) > 0 && (opts.exactFirstCombos ? sim.firstCombos !== opts.minFirstCombos : sim.firstCombos < opts.minFirstCombos)) ||
+    ((opts.minFirstAttrCombos ?? 0) > 0 && (opts.exactFirstAttrCombos ? sim.firstAttrCombos !== opts.minFirstAttrCombos : sim.firstAttrCombos < opts.minFirstAttrCombos)) ||
+    ((opts.minFirstRunes ?? 0) > 0 && (opts.exactFirstRunes ? sim.firstRunes !== opts.minFirstRunes : sim.firstRunes < opts.minFirstRunes)) ||
+    (opts.clearTypes ?? []).some(t => sim.firstClearedByType[t] < clearTotals[t]) ||
+    (opts.firstWaveHaveTypes ?? []).some(t => sim.firstClearedByType[t] === 0);
+}
+
+// Evaluate ONE conversion candidate end-to-end — shared by the in-process
+// sequential prefix AND the worker-side message handler (same module,
+// loaded fresh in both the main thread and every worker), so the two never
+// drift out of sync the way hand-duplicated copies would.
+function evaluateRearrangeConvertCandidate(board, opts, clearTotals, path) {
+  const convertedBoard = buildConvertedBoard(board, path, opts.convertType);
+  const rsResult = new RearrangeSolver(convertedBoard, opts).solve();
+  let candidateBoard = rsResult.board, engine = 'RearrangeSolver';
+  let sim = BoardSimulator.resolve(rsResult.board.clone(), opts);
+  if (rearrangeConvertDemandMissed(sim, opts, clearTotals)) {
+    const planned = new RearrangeCoveragePlanner(convertedBoard, opts).solve();
+    if (planned.solution) {
+      const plannerSim = BoardSimulator.resolve(planned.solution.board.clone(), opts);
+      if (!rearrangeConvertDemandMissed(plannerSim, opts, clearTotals) || plannerSim.firstRunes > sim.firstRunes) {
+        candidateBoard = planned.solution.board; engine = 'RearrangeCoveragePlanner'; sim = plannerSim;
+      }
+    }
+  }
+  return {
+    path, board: candidateBoard.grid, engine,
+    sim: { firstCombos: sim.firstCombos, firstAttrCombos: sim.firstAttrCombos, firstRunes: sim.firstRunes, firstClearedByType: sim.firstClearedByType },
+  };
+}
+
+/**
+ * Parallel replacement for `solveRearrangeConvertAware` (P56). Each
+ * candidate first-drag corridor already runs a fully independent fresh
+ * solve in the sequential version, so distributing candidates across
+ * workers changes wall time only, never the answer's quality relative to
+ * trying the same candidate SET.
+ *
+ * TWO earlier designs were measured LIVE and both were slower than
+ * sequential:
+ *   1. Batches-of-`workers` rounds, `Promise.all` per batch: paid a full
+ *      worker-spawn round on every batch instead of once.
+ *   2. One-shot STATIC pre-sharding (candidates split into K fixed groups
+ *      before knowing which would succeed): the `Promise.all` barrier
+ *      waited for the SLOWEST shard to exhaust its whole list even when an
+ *      early candidate in a DIFFERENT shard already succeeded.
+ *   3. A "fix" for #2 — a rolling pool where K workers each pull ONE
+ *      candidate at a time from a shared cursor, spawning a FRESH worker
+ *      per candidate — was ALSO slower, including on the exhaustive
+ *      (every-candidate-needed) case that should be parallelism's best
+ *      case. Root cause, isolated directly: a brand-new worker's first
+ *      `RearrangeSolver`/`BoardSimulator` call pays real cold-JIT/module-
+ *      load tax (measured ~1.3s of pure warmup on a candidate whose actual
+ *      work was ~80ms) — `solveDoraParallel`/`solveClearAllParallel` never
+ *      pay this because they spawn K workers ONCE and feed each MANY
+ *      items, amortizing warmup across a whole shard; spawning fresh per
+ *      candidate pays the full tax on every single one.
+ *
+ * Fix: a PERSISTENT worker pool — spawn exactly `K = min(workers,
+ * candidates.length)` long-lived workers ONCE, each staying alive for the
+ * whole call. The master hands out candidates one at a time via
+ * `postMessage`; each worker computes and replies, then either receives
+ * the next candidate (reusing its now-JIT-warm state) or is terminated
+ * once the master has nothing left to give it. The moment any result
+ * fully satisfies the demand, the master stops dispatching new work and
+ * terminates every worker immediately (killing any others mid-flight is
+ * safe and cheap — they're discarded, not awaited). This gets both
+ * properties right: true global early-stop (no slow-shard-dominates
+ * problem) AND warmup amortized across a whole call (no per-candidate
+ * cold-start tax).
+ *
+ * @returns same shape as `solveRearrangeConvertAware`
+ */
+function solveRearrangeConvertAwareParallel(board, options = {}, workers = defaultWorkers()) {
+  const opts = plainOptions(options);
+  if (workers <= 1) return Promise.resolve(solveRearrangeConvertAware(board, opts));
+
+  const movableCells = computeMovableComponents(board, opts.flags ?? null).flat();
+  const convertType = opts.convertType;
+  const convertCount = opts.convertCount ?? Infinity;
+  const maxCandidates = opts.conversionCandidates ?? 24;
+  const candidates = enumerateConversionCandidates(board, movableCells, maxCandidates);
+
+  if (candidates.length === 0) {
+    // Same degenerate fallback as the sequential function (no candidates
+    // generated — e.g. every movable cell is isolated).
+    const result = new RearrangeSolver(board, opts).solve();
+    const decomposed = decomposeRearrangement(board, result.board, movableCells, convertType, convertCount);
+    return Promise.resolve({ drags: decomposed.drags, board: decomposed.board, engine: 'RearrangeSolver(no-candidates)', movableCells });
+  }
+
+  const clearTotals = Array(6).fill(0);
+  for (const row of board.grid) for (const v of row) {
+    const bt = v >= CURSE_BASE ? v - CURSE_BASE : (v >= SHIELD_BASE ? v - SHIELD_BASE : v);
+    if (bt >= 0 && bt < FROZEN) clearTotals[bt]++;
+  }
+  const demandMissed = sim => rearrangeConvertDemandMissed(sim, opts, clearTotals);
+
+  let best = null, bestSim = null, bestPath = null, bestEngine = null;
+  const record = r => {
+    const stillMissed = demandMissed(r.sim);
+    const better = bestSim === null
+      || (!stillMissed && demandMissed(bestSim))
+      || (stillMissed === demandMissed(bestSim) && r.sim.firstRunes > bestSim.firstRunes);
+    if (better) { best = r; bestSim = r.sim; bestPath = r.path; bestEngine = r.engine; }
+    return !stillMissed;
+  };
+
+  // Small in-process SEQUENTIAL prefix before fanning out (measured live,
+  // 2026-07-11): candidates near the front of the list frequently already
+  // satisfy the demand on real boards — when that happens, sequential
+  // solving needs exactly ONE candidate, but a worker pool with K>1 workers
+  // ALWAYS pays for K candidates running concurrently before any of them
+  // can report back (there's no way to know in advance which candidate
+  // will succeed, so all K initial dispatches happen before any result is
+  // known). Paying for a small, bounded sequential prefix first is cheap
+  // insurance against that common case; only once the prefix is exhausted
+  // WITHOUT success do we know this is a genuinely hard/exhaustive board,
+  // which is exactly the case where fanning out actually pays off.
+  const PREFIX = Math.min(4, candidates.length);
+  let prefixTried = 0;
+  for (; prefixTried < PREFIX; prefixTried++) {
+    const r = evaluateRearrangeConvertCandidate(board, opts, clearTotals, candidates[prefixTried]);
+    if (record(r)) { prefixTried += 1; break; }
+  }
+  const remaining = candidates.slice(prefixTried);
+  if ((bestSim !== null && !demandMissed(bestSim)) || remaining.length === 0) {
+    return Promise.resolve(finishRearrangeConvertAware(board, opts, movableCells, convertType, convertCount, best, bestPath, bestEngine, 1, candidates.length));
+  }
+
+  const K = Math.min(workers, remaining.length);
+  let nextIndex = 0, stop = false, active = K;
+
+  return new Promise((resolve, reject) => {
+    const finish = () => resolve(finishRearrangeConvertAware(board, opts, movableCells, convertType, convertCount, best, bestPath, bestEngine, K, candidates.length));
+    const pool = [];
+    const settled = new Set(); // guards against terminate()+decrement happening twice for one worker
+    const settle = w => {
+      if (settled.has(w)) return;
+      settled.add(w);
+      w.terminate();
+      active -= 1;
+      if (active === 0) finish();
+    };
+    const dispatchNext = w => {
+      if (settled.has(w)) return;
+      if (stop || nextIndex >= remaining.length) { settle(w); return; }
+      w.postMessage({ path: remaining[nextIndex++] });
+    };
+    for (let i = 0; i < K; i++) {
+      const w = new Worker(__filename, {
+        workerData: { mode: 'rearrange-convert-worker', boardGrid: board.grid, options: opts },
+        resourceLimits: { maxYoungGenerationSizeMb: 128 },
+      });
+      pool.push(w);
+      w.on('message', r => {
+        if (settled.has(w)) return;
+        if (!stop && record(r)) {
+          stop = true;
+          for (const sibling of pool) if (sibling !== w) settle(sibling);
+        }
+        dispatchNext(w);
+      });
+      w.on('error', reject);
+      dispatchNext(w);
+    }
+  });
+}
+
+// Shared phase1/phase2 finisher for solveRearrangeConvertAwareParallel — the
+// winning candidate's real first drag plus a conversion-free
+// decomposeRearrangement, identical to the sequential function's tail.
+function finishRearrangeConvertAware(board, opts, movableCells, convertType, convertCount, best, bestPath, bestEngine, K, candidateCount) {
+  const bestBoard = new Board();
+  bestBoard.fromArray(best.board);
+
+  // Phase 1: the ACTUAL first drag, with real conversion applied — same
+  // mechanics as the sequential function, run once here (cheap; not worth
+  // sharding — measured ~2ms).
+  const convertedBoard = buildConvertedBoard(board, bestPath, convertType);
+  let cur = bestPath[0];
+  const moves1 = [];
+  const dirName = (dx, dy) => dx === 1 ? 'right' : dx === -1 ? 'left' : dy === 1 ? 'down' : 'up';
+  for (let i = 1; i < bestPath.length; i++) {
+    const nxt = bestPath[i];
+    moves1.push(dirName(nxt.x - cur.x, nxt.y - cur.y));
+    cur = nxt;
+  }
+  const phase1Drag = { startX: bestPath[0].x, startY: bestPath[0].y, path: bestPath, moves: moves1 };
+
+  // Phase 2: realize the winning candidate's board from convertedBoard with
+  // NO further conversion — guaranteed exact, same as the sequential path.
+  const phase2 = decomposeRearrangement(convertedBoard, bestBoard, movableCells, null, 0);
+
+  return {
+    drags: [phase1Drag, ...phase2.drags],
+    board: phase2.board,
+    engine: `ConvertAware(${bestEngine},candidates=${candidateCount},workers=${K})`,
+    movableCells,
+  };
+}
+
 /**
  * Parallel TargetPlanner.solveClearAll: plans coverage targets ONCE (pure
- * board geometry — planClearAllTargets never depends on beamWidth), then
  * routes them at an ESCALATING beam width, stopping at the first success.
  *
  * Why escalate instead of using a fixed width: L22 showed single/no-pin (or
@@ -419,4 +626,24 @@ if (!isMainThread && workerData && (workerData.mode === 'dora' || workerData.mod
   }
 }
 
-module.exports = { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, defaultWorkers };
+if (!isMainThread && workerData && workerData.mode === 'rearrange-convert-worker') {
+  // Persistent worker for solveRearrangeConvertAwareParallel: board/opts/
+  // clearTotals setup happens ONCE per worker lifetime (not once per
+  // candidate) — the master feeds this worker candidates one at a time via
+  // postMessage, reusing this already-JIT-warm worker across all of them,
+  // which is the whole point of this design (see the master function's
+  // doc comment for why a fresh-worker-per-candidate design was slower).
+  const board = new Board();
+  board.fromArray(workerData.boardGrid);
+  const opts = workerData.options;
+  const clearTotals = Array(6).fill(0);
+  for (const row of board.grid) for (const v of row) {
+    const bt = v >= CURSE_BASE ? v - CURSE_BASE : (v >= SHIELD_BASE ? v - SHIELD_BASE : v);
+    if (bt >= 0 && bt < FROZEN) clearTotals[bt]++;
+  }
+  parentPort.on('message', msg => {
+    parentPort.postMessage(evaluateRearrangeConvertCandidate(board, opts, clearTotals, msg.path));
+  });
+}
+
+module.exports = { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, solveRearrangeConvertAwareParallel, defaultWorkers };

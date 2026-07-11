@@ -13,6 +13,7 @@ From `C:\Projects\autospinner`:
 ```powershell
 git -c safe.directory=C:/Projects/autospinner status --short
 git -c safe.directory=C:/Projects/autospinner branch --show-current
+node docs/shared-harness/validate-shared-harness.js
 node .codex/hooks/validate-harness.js
 node .codex/hooks/test-hooks.js
 ```
@@ -21,6 +22,7 @@ Then classify the task and read only the row that applies.
 
 | Need | Read | Use |
 |---|---|---|
+| Cross-runtime safety, retry, review, commit, evidence, or knowledge invariant | [shared repository policy](../shared-harness/REPOSITORY-POLICY.md) | Sole shared authority for Codex and Claude Code |
 | Why the harness exists or which control maps to a leak | [01-HARNESS-LEAK-DIAGNOSIS.md](01-HARNESS-LEAK-DIAGNOSIS.md) | Architecture decisions and control traceability |
 | Delegate, select a tier, retry, escalate, or de-escalate | [02-MODEL-DISPATCH-PROTOCOL.md](02-MODEL-DISPATCH-PROTOCOL.md) | Canonical dispatch authority |
 | Decide whether to stop, deliver, or ask the User | [03-JUDGMENT-EXTERNALIZATION-MATRIX.md](03-JUDGMENT-EXTERNALIZATION-MATRIX.md) | AP, TC, and CB criteria |
@@ -35,6 +37,7 @@ Then classify the task and read only the row that applies.
 
 | Surface | Responsibility | Authority |
 |---|---|---|
+| `docs/shared-harness/` | Shared policy and deterministic Codex/Claude drift validation | Cross-runtime invariants |
 | `AGENTS.md` | Concise root task router and non-negotiable lifecycle | Permanent repository instruction entry point |
 | `.codex/config.toml` | Sandbox, hook feature, agent depth/thread cap | Trusted-project runtime defaults |
 | `.codex/hooks.json` | Hook event wiring only | Canonical project hook representation |
@@ -52,10 +55,11 @@ Apply instructions in this order:
 
 1. System/developer policy.
 2. Current explicit User instructions.
-3. Root `AGENTS.md` and any closer directory instruction loaded by Codex.
-4. Canonical documents linked by `AGENTS.md` for the current decision.
-5. Task-specific dispatch package.
-6. Legacy `CLAUDE.md`/`.claude/harness/` only for targeted application facts that do not conflict with the active Codex policy.
+3. Shared repository policy for cross-runtime invariants.
+4. Root `AGENTS.md` and any closer directory instruction for Codex-specific rules.
+5. Canonical Codex documents linked by `AGENTS.md` for runtime-specific decisions.
+6. Task-specific dispatch package.
+7. Claude adapter/application sources only for targeted facts or Claude-specific details that do not conflict with the shared policy.
 
 Root `AGENTS.override.md` is intentionally absent. If one appears, the validator fails until its temporary purpose, scope, replaced rules, and expiration are documented or it is retired with backup.
 
@@ -103,16 +107,17 @@ Live browser/ADB behavior requires live evidence. If infrastructure is unavailab
 | Deliverable | State |
 |---|---|
 | Diagnosis, dispatch, judgment, templates, knowledge, handoff, lesson routing | `COMPLETE` |
+| Shared Codex/Claude policy and drift validator | `DEPLOYED`; current acceptance comes from the validators plus a fresh review, not from this index |
 | Root router, project config, agents, hooks, maintenance skill | `COMPLETE`; deterministic control tests pass |
-| Adversarial review report | `COMPLETE`; final independent findings Critical 0, High 0, Medium 0, Low 0 |
+| Adversarial review report | Baseline report retained; every later harness migration requires its own fresh review and correction record |
 | Final verification report | `COMPLETE`; `PASS WITH DOCUMENTED LIMITATIONS` |
 | Actual project config/hook loading in a new trusted session | `PARTIALLY VERIFIED`; static config accepted, live reload/trust pending |
 
-## 8. Legacy coexistence
+## 8. Runtime coexistence
 
-Do not delete or silently rewrite `CLAUDE.md` or `.claude/harness/`. They hold application-specific facts and pre-existing User work. For Codex orchestration, the files in this index supersede Claude-specific model names, tool names, retry ambiguity, self-review exemptions, and mandatory wholesale context loading.
+Do not delete or silently rewrite `CLAUDE.md` or `.claude/harness/`. They are the Claude adapter and hold application-specific facts/history. The shared repository policy owns cross-runtime invariants; Codex documents own Codex models/tools/hooks, and Claude documents own Claude models/tools/permissions.
 
-When application facts are needed, search the relevant term first and read only the owning section. Do not load all of `PROJECT-FACTS.md` and `LESSONS.md` into the Commander context.
+When application facts are needed, search the relevant term first and read only the owning section. Do not load all of `PROJECT-FACTS.md` and `LESSONS.md` into either Commander context.
 
 ## 9. Tomorrow's first bounded task
 

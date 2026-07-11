@@ -3,6 +3,8 @@
 > Usage: when the commander calls the Agent tool, copy the matching template, fill in the `{{...}}` blanks, and send it as the prompt.
 > `[optional]` sections may be deleted whole; all other sections **must never be omitted**. The templates already embed the "three required parts of a work order" from rules 01, section 3.
 
+> Shared authority: [`docs/shared-harness/REPOSITORY-POLICY.md`](../../docs/shared-harness/REPOSITORY-POLICY.md) owns cross-runtime scope, retry, review, evidence, and reporting invariants. These templates supply Claude-specific model and Agent syntax.
+
 ## Shared Rules
 
 - Model selection: search/implementation/refactoring/review → `model: "sonnet"`; mechanical batch work with an already-fixed pattern → `model: "haiku"`; escalated redo → `model: "opus"` (failure trail must be attached).
@@ -31,8 +33,8 @@
 
 ```
 [Goal] {{one-sentence feature description}}
-[Background] First read C:\Projects\autospinner\CLAUDE.md and C:\Projects\autospinner\.claude\harness\PROJECT-FACTS.md.
-Files relevant to this task: {{file:line-range list; the commander must think this through first}}
+[Background] Read C:\Projects\autospinner\CLAUDE.md, then search and read only the targeted C:\Projects\autospinner\.claude\harness\PROJECT-FACTS.md section that owns this task.
+Files and targeted facts sections relevant to this task: {{file:line-range and facts-section list; the commander must think this through first}}
 [Known constraints] {{e.g.: manifest.json loads algorithm.js before content.js; no external dependencies may be introduced}}
 [Implementation requirements]
 - Modify only {{allowed list}}; do not touch any other file

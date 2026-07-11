@@ -2,20 +2,27 @@
 
 > Purpose: let weak models safely grow this harness with experience, while preventing rules from being quietly broken.
 
+> Shared authority: [`docs/shared-harness/REPOSITORY-POLICY.md`](../../docs/shared-harness/REPOSITORY-POLICY.md) owns cross-runtime knowledge routing, policy-change approval, backups, and commit authority. This file owns Claude/application fact and history procedures.
+
 ## 1. File Permission Tiers
 
 | Tier | File | The model may | Requires explicit User consent |
 |---|---|---|---|
 | 🟢 Free write | `LESSONS.md` | Append entries per the section 2 format; trigger compaction per section 4 | Deleting the substantive content of others' entries (including past sessions') |
 | 🟡 Change with evidence | `PROJECT-FACTS.md` | Add facts with verification evidence; upgrade UNVERIFIED to verified (with evidence); correct disproven facts (keep one line: "originally recorded X, disproven 2026-xx-xx, see LESSONS#n") | Deleting an entire fact |
-| 🟡 Change with evidence | `CLAUDE.md` | Update file-map rows (when files are added/removed), add new file pointers to the routing table | Changing any hard rule R1–R5, or the forbidden items in the tool routing table |
+| 🟡 Change with evidence | `CLAUDE.md` | Update file-map rows (when files are added/removed), add new file pointers to the routing table | Changing any hard rule R1–R6, shared-policy authority, or the forbidden items in the tool routing table |
 | 🔴 Frozen | `01`, `02`, `03`, `04` (this file), `05` | Fix typos, dead paths, stale line numbers (mechanical corrections). Exception: `05` section 3 "circuit-breaker handover area" may be appended to when a session circuit-breaks, treated as 🟢 | **Any change to rule semantics** — including loosening thresholds, adding/removing criteria, changing retry counts |
 
-**Iron rule**: a semantic change to a 🔴 file must first be presented to the User as "current text / proposed text / motivation (citing specific LESSONS entry numbers)"; only after consent may you Edit, and the commit message uses the `harness-rule-change:` prefix (this prefix is the alternative form of section 5's `harness:` — pick one, do not stack them). **The motivation must not be "this rule inconvenienced me in this task"** — when a rule blocks you, that is usually exactly it doing its job.
+**Iron rule:**
+
+- Present a semantic change to a 🔴 file or the shared policy as "current text / proposed text / motivation (with evidence)" before editing.
+- Edit only after explicit User consent, timestamped backups, validation, and independent review.
+- Policy-edit approval does not authorize a commit. If the User separately requests one, use `harness-rule-change:` for semantic rule changes.
+- The motivation must not be "this rule inconvenienced me in this task"; when a rule blocks you, that is usually exactly it doing its job.
 
 ## 2. Pitfall Records (LESSONS.md) Write Format
 
-When to write: CLAUDE.md R5 — write **the moment** you hit the pitfall, not at session end (by session end it is often compressed and forgotten).
+When to write: route application facts to PROJECT-FACTS and application/Claude history to LESSONS. Route shared workflow pitfalls to `docs/codex-harness/lessons/PITFALLS.md` using its confirmed/provisional format. Do not let an evidence record change policy by itself.
 
 Format (fixed five fields, total length ≤10 lines, numbers increment):
 
@@ -49,10 +56,10 @@ Compaction algorithm (LESSONS):
 1. Find entries with repeated themes (≥2 entries sharing a root cause) → abstract into one general rule.
 2. Where the general rule goes: if it's a fact → merge into PROJECT-FACTS; if it's a judgment criterion → **propose** adding it to 02-JUDGMENT-MATRIX (a 🔴 file; follow the section 1 consent process).
 3. Compress each abstracted original entry into one line: `## L{{n}} (abstracted into {{destination}}) original title`.
-4. Record a LESSON for the compaction itself? No — just note `lessons-compaction` in the git commit message.
+4. Record a LESSON for the compaction itself? No. If the User separately requests a commit, `lessons-compaction` may be used in its message.
 
-## 5. Anti-Corruption: Git Audit Requirements
+## 5. Anti-Corruption: Diff and Optional Git Audit
 
-- Any change to `.claude/harness/` or `CLAUDE.md` must be an **independent commit** (not mixed with code changes in the same commit), with message prefix `harness:`; for rule-semantics changes use `harness-rule-change:` (see section 1).
-- This lets the User audit the system's evolution with one command: `git log --oneline -- .claude/harness CLAUDE.md`
-- Before a model takes over a large task in a new session, it is advised to run the command above + `git diff HEAD~5 -- .claude/harness` to quickly confirm whether rules changed recently (a semantic change without the `harness-rule-change:` prefix = a corruption signal; report to the User).
+- No commit is allowed without an explicit User request. Harness changes must remain isolated in the reported diff even when they are not committed.
+- If the User requests a commit, keep harness policy separate from application work and use `harness:`; use `harness-rule-change:` for semantic policy changes.
+- Audit existing history with `git log --oneline -- .claude/harness CLAUDE.md` and inspect current diffs before a large task. A semantic change with no User approval/evidence is a corruption signal even when its commit prefix looks correct.

@@ -3,19 +3,19 @@
 **Status:** COMPLETE
 **Purpose:** Define safe autonomous maintenance, approval-required policy changes, lesson records, and compaction.
 **Intended readers:** Commanders, harness maintainers, reviewers, and future sessions.
-**Source-of-truth status:** Canonical policy for changing the Codex harness and its lesson store.
-**Related files:** [AGENTS.md](../../AGENTS.md), [harness-maintenance skill](../../.agents/skills/harness-maintenance/SKILL.md), [lessons index](lessons/README.md), [pitfalls](lessons/PITFALLS.md)
+**Source-of-truth status:** Canonical Codex maintenance procedure; [shared repository policy](../shared-harness/REPOSITORY-POLICY.md) owns cross-runtime invariants and their change authority.
+**Related files:** [AGENTS.md](../../AGENTS.md), [shared repository policy](../shared-harness/REPOSITORY-POLICY.md), [harness-maintenance skill](../../.agents/skills/harness-maintenance/SKILL.md), [lessons index](lessons/README.md), [pitfalls](lessons/PITFALLS.md)
 
 ## 1. Scope and precedence
 
-This protocol governs:
+This protocol governs the Codex adapter:
 
 - `AGENTS.md`
 - `.codex/`
 - `.agents/skills/harness-maintenance/`
 - `docs/codex-harness/`
 
-The existing `CLAUDE.md` and `.claude/harness/` remain legacy Claude/application-operational sources. They contain pre-existing User changes and frozen semantics. Do not consolidate, compact, delete, or reinterpret them under this protocol without explicit User approval and a sibling timestamped backup.
+`CLAUDE.md` and `.claude/harness/` are the Claude adapter plus application fact/history sources. Shared-policy synchronization may modify their active adapter clauses only with explicit User approval, a bounded cross-runtime work order, sibling timestamped backups, shared/native validation, and independent review. Never consolidate or rewrite dirty facts, lessons, recognition semantics, or history as routine Codex maintenance.
 
 No maintenance action may modify application source. No session may commit changes unless the User explicitly asks for a commit.
 
@@ -204,18 +204,18 @@ The reviewer must verify:
 - Review accumulated backups quarterly.
 - Removal requires explicit User approval after Git history and the replacement artifact are verified.
 
-## 12. Legacy coexistence and conflicts
+## 12. Shared-policy coexistence and conflicts
 
-For Codex operation, `AGENTS.md` and `docs/codex-harness/` define orchestration, safety, retry, and completion policy. `CLAUDE.md` and `.claude/harness/` may still supply application facts when explicitly routed, but Claude-specific model/tool names and conflicting workflow policy do not override the Codex sources.
+`docs/shared-harness/REPOSITORY-POLICY.md` defines safety, retry, review, commit, evidence, and knowledge-routing invariants for both runtimes. `AGENTS.md` and `docs/codex-harness/` own Codex-specific models, tools, hooks, skills, agents, and detailed procedures. `CLAUDE.md` and `.claude/harness/` own Claude-specific models, Agent syntax, tools, permissions, and application facts/history.
 
 When a conflict is found:
 
 1. Preserve both texts.
-2. Cite exact lines and the active instruction hierarchy.
-3. Follow the higher-priority current User/system/Codex policy.
+2. Cite exact lines and the active native/shared instruction hierarchy.
+3. Follow higher-priority system/User instructions, then the shared invariant for cross-runtime policy.
 4. Record a `PROVISIONAL` pitfall only if recurrence is plausible.
-5. Ask the User before changing frozen legacy semantics.
+5. Ask the User before changing shared policy or active adapter semantics; do not edit facts/history merely to remove a workflow conflict.
 
 ## 13. Protocol verification
 
-This protocol is satisfied when the validator reports no duplicate IDs, broken links, oversized entry points, invalid config, or root override masking; changed files have backups when required; a read-only reviewer accepts the update; and the final report distinguishes autonomous corrections from User-approved policy changes.
+This protocol is satisfied when both `node docs/shared-harness/validate-shared-harness.js` and the native Codex validator pass; there are no duplicate IDs, broken links, oversized entry points, invalid config, or root override masking; changed files have backups when required; a read-only reviewer accepts the update; and the final report distinguishes autonomous corrections from User-approved policy changes.

@@ -2,6 +2,8 @@
 
 > Readers: the main-conversation model acting as commander (default Opus 4.8). Purpose: keep the commander's decision context clean, outsource consumable work, and follow a fixed escalation/de-escalation path on failure instead of retrying in place.
 
+> Shared authority: [`docs/shared-harness/REPOSITORY-POLICY.md`](../../docs/shared-harness/REPOSITORY-POLICY.md) owns cross-runtime retry, review, evidence, commit, and safety invariants. This file is the Claude-specific model/Agent adapter and may be stricter but never weaker.
+
 ## 1. Role Definitions
 
 | Role | Default model | Responsibility | Explicitly forbidden |
@@ -9,7 +11,7 @@
 | Commander | Main-conversation model (Opus 4.8) | Decompose tasks, dispatch work, adjudicate, communicate with the User | Personally doing the consumable work listed in section 2 below |
 | Worker | Sonnet subagent | Search, file reading, implementation, refactoring | Self-acceptance (see section 5) |
 | Cheap batch worker | Haiku subagent | Mechanical application of an already-fixed pattern (formatting, bulk replacement, applying a template file by file) | Any work that requires judgment |
-| Verifier | Fresh-context Sonnet subagent | Read-back, run tests, check against acceptance criteria | Fixing code (report findings only; do not touch code) |
+| Verifier | Fresh-context Sonnet subagent | Read-only read-back, tests, and acceptance against disk state | Fixing code or performing implementation self-review |
 
 > The Agent tool's `model` parameter is the dispatch mechanism: `model: "sonnet"` / `"haiku"` / `"opus"`.
 
@@ -17,7 +19,7 @@
 
 If any one of these holds, delegation to a subagent is **mandatory**; the commander receives only the condensed conclusion:
 
-- D1: A question expected to require reading **more than 3 files** or **more than 400 lines** to answer → dispatch Explore (search-type) or general-purpose (analysis-type).
+- D1: A question expected to require **4 or more read-heavy files**, **more than 200 lines**, or **more than 20 KiB** of output → dispatch Explore (search-type) or general-purpose (analysis-type).
 - D2: Cross-repo / cross-directory scans, "find all places that use X" tasks → dispatch Explore.
 - D3: An implementation expected to produce **more than 150 lines** of new code → dispatch a worker to implement; the commander only reviews the diff summary.
 - D4: Looking up external docs (Chrome API, library usage) → dispatch a subagent to query via context7 and report the conclusion plus source; do not pull whole doc pages into the main conversation.
@@ -35,6 +37,8 @@ Every work order must contain the following three sections. Templates in `03-DEL
 
 ## 4. Escalation/De-escalation Path (fixed algorithm — do not improvise)
 
+`RETRY_BUDGET = 2 materially different repair attempts per capability tier`.
+
 ```
 Haiku errors (tool-call error or syntax error)
   └─ 1 time → immediately escalate to Sonnet to redo the same subtask (Haiku gets no second chance)
@@ -49,20 +53,20 @@ After Opus solves a fixed pattern
   └─ Write the solution as "pattern description + one completed example" → hand back down to Sonnet/Haiku to batch-apply to the remaining sites
      (example: Opus fixes one off-by-one coordinate conversion → Haiku applies the same pattern to the other 5 call sites)
 
-Retry cap for the same matter: at most 2 rounds across the whole chain (i.e. Opus also fails twice)
-  └─ Trigger the circuit breaker (02-JUDGMENT-MATRIX.md matrix three C1): stop autonomous work,
-     compile the failure trail and report to the User, or take the section 6 Codex rescue channel (requires User consent).
+Each capability tier gets at most 2 materially different repair attempts for the same retry key.
+  └─ After the strongest Claude tier fails twice: trigger the circuit breaker, stop autonomous work,
+     compile the failure trail and report to the User, or propose the section 6 Codex rescue channel (requires User consent).
 ```
 
-**Determining "same subtask failed"**: acceptance criteria not met, or the same symptom persists after the change. A changed symptom = a new subtask; the counter resets to zero.
+**Retry key and reset rule**: the retry key is `(bounded goal, failing acceptance check, observed symptom)`. A changed error message, symptom wording, or regression in the same patch chain does not reset the counter. Reset only after the patch chain is reverted/abandoned and a genuinely new bounded goal/check begins, or the User approves a new design.
 
 ## 5. Isolated Verification (the implementer may not verify itself)
 
-- V1 **Separation principle**: "I tested it" from the agent that wrote the code does not count. Acceptance must be performed by another **fresh-context** subagent (a new Agent call, not sharing the implementer's context). Sole exemption: single-file changes of ≤20 lines may skip the verifier (same clause as `02-JUDGMENT-MATRIX.md` DoD-3), but the actual-run verification (DoD-2) cannot be skipped.
+- V1 **Separation principle**: "I tested it" from the agent that wrote the code does not count. Every file or external-state change requires another **fresh-context, read-only** subagent (a new Agent call, not sharing the implementer's context). There is no small-change exemption.
 - V2 **The verifier's input**: give only "the acceptance criteria list + the file paths involved", **not the implementation narrative** — to avoid contamination by the implementer's reasoning (what the implementer says doesn't matter; what's in the files does).
 - V3 **Acceptance actions** (choose by task type):
   - Logic tasks: re-read the files (read-back) + actually run the Node verification command (PROJECT-FACTS section 4), pasting the real output.
-  - Browser tasks: cannot be verified automatically → the verifier's job becomes "check whether the code outputs the `[TOS]` structured logs the contract requires", and produce a 3-step verification guide for the User.
+  - Browser tasks: check whether the code outputs the required `[TOS]` structured logs and produce a 3-step verification guide. A guide or expected output is not live evidence; without a real browser observation, report `PARTIALLY VERIFIED` or `BLOCKED`, never unconditional PASS.
   - Trade-off tasks (e.g. two algorithm strategies): multi-sample review — dispatch 2 subagents to score independently, the commander adjudicates; if the two conclusions conflict, treat it as "insufficient evidence" and design an experiment rather than vote.
 - V4 **Acceptance verdict format**: `PASS` / `FAIL(reason + evidence line numbers)` — one of the two. "Mostly fine" counts as FAIL.
 

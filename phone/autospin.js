@@ -9,9 +9,36 @@
  *   node phone/autospin.js                    # capture -> recognize -> solve -> spin
  *   node phone/autospin.js --rounds 5         # spin 5 turns; waits for the board to
  *                                             # settle (2 identical captures) between spins
+ *
+ *   Repeated-grinding loop (cmd.exe, NOT PowerShell/bash — %i needs doubling
+ *   to %%i inside a .bat file): runs the command 10 times in sequence (1
+ *   through 10 inclusive), continuing to the next iteration even if a run
+ *   fails/aborts (unlike --rounds, which is one in-process run that stops the
+ *   whole batch on an unhandled error). Each iteration is a fresh process, so
+ *   a crash/ABORT/stuck board on one iteration doesn't take down the rest —
+ *   preferred over --rounds for long unattended sessions for that reason.
+ * 
+ *     for /L %i in (1,1,10) do node phone/autospin.js --beam 6400 --max-path 120 --no-final --move-ms 60 --fire-route
+ * 
+ *   Flags used here: --beam/--max-path widen the search for harder boards;
+ *   --no-final skips the post-spin settle report (faster loop, since the next
+ *   iteration's own board capture re-confirms state anyway); --move-ms 60 is
+ *   a faster per-cell drag speed than the 240ms default (raise if runes start
+ *   dropping — see PROJECT-FACTS P8/P18); --fire-route applies the AutoDora
+ *   fire-trail constraint (P15) — drop it if the current stage doesn't have
+ *   that mechanic. Swap in whatever flags the current stage needs; the outer
+ *   `for /L` loop structure is what's reusable.
  *   node phone/autospin.js --dry              # everything except the touch
  *   node phone/autospin.js --confirm          # print recognized board + path, then
- *                                             # wait for Enter before actually spinning
+ *                                             # wait for Enter before actually spinning.
+ *                                             # By default, re-captures the board on
+ *                                             # Enter and re-solves if it changed while
+ *                                             # you were reading (BOARD_CHANGED=true) —
+ *                                             # add --no-stale-check to skip that re-check
+ *                                             # and just spin the originally solved plan
+ *                                             # (useful if it keeps false-positiving on a
+ *                                             # busy/animated board and you already know
+ *                                             # nothing really moved).
  *   node phone/autospin.js --first-combos 4      # EXACTLY 4 first-wave combos (combo-shield
  *                                                # mode; overshoot rejected too)
  *   node phone/autospin.js --first-combos 7+     # at least 7 first-wave combos
@@ -40,6 +67,31 @@
  *                                                # meaning). --rearrange-beam N / --rearrange-
  *                                                # steps N tune quality vs time (default
  *                                                # 60/40, per movable component).
+ *                                                # --rearrange-pause-ms N sets the gap
+ *                                                # between one drag's release and the next
+ *                                                # drag's touch-down (default 350, raised
+ *                                                # from 150 after a live failure: fast
+ *                                                # --move-ms + many chained drags let
+ *                                                # consecutive drags bleed into each other,
+ *                                                # so the real board diverged from the
+ *                                                # simulated BOARD_AFTER_ROW* starting
+ *                                                # partway through the sequence — this gap
+ *                                                # is what to raise, NOT --move-ms, since it
+ *                                                # is the recognition gap BETWEEN drags, not
+ *                                                # the speed WITHIN one. Live-confirmed
+ *                                                # working (2026-07-11/12, User's device) at
+ *                                                # both --move-ms 100 and --move-ms 80 paired
+ *                                                # with --rearrange-pause-ms 50 (well below
+ *                                                # the 350 default) — full 22-drag
+ *                                                # rearrangement, real board matched
+ *                                                # BOARD_AFTER_ROW* exactly both times:
+ *                                                #   node phone/autospin.js --rearrange
+ *                                                #     --convert wood:max --first-runes 30
+ *                                                #     --confirm --rearrange-beam 160
+ *                                                #     --rearrange-steps 60
+ *                                                #     --rearrange-conversion-candidates 200
+ *                                                #     --move-ms 80 --rearrange-pause-ms 50
+ *                                                #     --screenshot-after-spin --no-final
  *   node phone/autospin.js --rearrange --convert wood:max
  *                                                # --convert composes with --rearrange
  *                                                # (User-confirmed): ONLY the FIRST physical
@@ -202,6 +254,11 @@
  *                                             # for "does the kill/restart/resume cycle still work"
  *                                             # on a real account, independent of solving. Composes
  *                                             # with --rounds (each round re-probes after reverting).
+ *   node phone/autospin.js --screenshot-after-spin  # after the spin's drag(s) finish (works for
+ *                                             # both normal single-drag mode and --rearrange's
+ *                                             # multi-drag mode), saves a screenshot to
+ *                                             # phone/screenshots/<timestamp>_after-spin.png. Off
+ *                                             # by default (no option — plain on/off flag).
  *
  * Shield overlay (`+` suffix, live 2026-07-10): per-rune status — cannot
  * dissolve even at a match of 3+, but CAN be picked up and dragged/passed
@@ -245,7 +302,7 @@ const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
-const { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, defaultWorkers } = require('./parallel.js');
+const { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, solveRearrangeConvertAwareParallel, defaultWorkers } = require('./parallel.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
 const ROWS = [1330, 1510, 1690, 1870, 2050];
@@ -429,6 +486,15 @@ const SIGNATURES = [
   // was probed as a shield discriminator and does NOT separate (plain
   // Hearts overlap non-thorn shields); the signature point is the fix.
   { type: 2, thorn: true, rgb: [78, 103, 78] },    // Wood + thorn (bright instance)
+  // Shielded Heart (live 2026-07-12, User-confirmed on 3 cells — (4,0)/(4,1)/
+  // (5,1) — all measuring an identical (218,140,189), r-b=+29, cleanly in the
+  // Heart-family direction per the r-b discriminator above). No Heart+shield
+  // entry existed yet, so nearest-match fell through to the closest available
+  // shield signature (Dark+shield cluster B, dist 42.6) — silently wrong
+  // element. This point sits far enough from both Dark+shield clusters
+  // (dist 42.6/46.9) that the existing r-b family discriminator (scoped to
+  // thorn cells only) isn't needed here; these are plain non-thorn shields.
+  { type: 5, shield: true, rgb: [218, 140, 189] }, // Heart + shield
 ];
 const MAX_SIG_DIST = 60;
 
@@ -1315,7 +1381,7 @@ async function dispatchTouchPath(w, screenPath, stepMs) {
   return t0;
 }
 
-async function executeTouchPath(screenPath, stepMs) {
+async function executeTouchPath(screenPath, stepMs, screenshotAfterSpin) {
   // Hygiene: a lingering injector from a killed session could still hold or
   // replay touch state — clear the field before every drag (root available).
   try { execSync('adb shell su -c "pkill -f MaaTouch"', { stdio: 'pipe' }); } catch { /* none running */ }
@@ -1323,6 +1389,22 @@ async function executeTouchPath(screenPath, stepMs) {
   await sleep(1500); // MaaTouch boot
   const w = s => p.stdin.write(s + '\n');
   const t0 = await dispatchTouchPath(w, screenPath, stepMs);
+  // Capture BEFORE releasing, while still held at the final point — NOT after
+  // release (bug found + fixed 2026-07-11, L64, from a SECOND live User
+  // report: even capturing immediately after 'u 0' still showed "4 Combo!!"
+  // already playing). The game starts resolving/dissolving the instant it
+  // sees the release, and that cascade animation runs faster than an adb
+  // screencap+pull round-trip (~200-500ms) can race — there is no post-
+  // release moment fast enough to catch the board before it starts
+  // dissolving. The only way to see the completed, pre-dissolve arrangement
+  // is to screenshot WHILE STILL HELD, same principle as --after-spin-kill's
+  // "mid-hold" screenshot (which also captures before ever releasing). A
+  // short settle sleep first lets the trailing rune stop visually drifting
+  // (same 300ms used by executeTouchPathAndKill's mid-hold capture).
+  if (screenshotAfterSpin) {
+    await sleep(300);
+    saveNamedScreenshot('after-spin');
+  }
   w('u 0'); w('c');
   const dragMs = performance.now() - t0;
   await sleep(2000); // grace: only the 2-line tail can be in flight
@@ -1353,13 +1435,20 @@ async function executeTouchPath(screenPath, stepMs) {
  * No settle-wait/re-capture between drags (User-confirmed model: no
  * gravity or dissolve happens until the stage timer expires, so there is
  * nothing to observe between drags — only the FINAL board matters).
- * UNVERIFIED (device offline this session): the 150ms pause between a
- * drag's release and the next drag's touch-down is a conservative guess at
- * "enough for the game to recognize a NEW gesture, not a continuation of
- * the last one" — has not been confirmed live; tune if drags bleed into
- * each other or feel unnecessarily slow.
+ *
+ * pauseMs (default 150, see --rearrange-pause-ms): gap between one drag's
+ * release and the next drag's touch-down, so the game reads it as a NEW
+ * gesture rather than a continuation of the last one. This is INDEPENDENT
+ * of stepMs/--move-ms — --move-ms only paces points WITHIN a single drag's
+ * movement, it never touches this gap. Live-confirmed 2026-07-11 (22-drag
+ * rearrangement at --move-ms 60): the default 150ms pause was NOT enough —
+ * BOARD_AFTER_ROW* (the simulated end state) diverged from the real
+ * post-spin board starting from an early drag, then every later drag
+ * (planned against the assumed-correct intermediate board) compounded the
+ * error into a totally different final arrangement. Root cause is the gap,
+ * not drag speed: raising --rearrange-pause-ms lets --move-ms stay fast.
  */
-async function executeMultiDragPath(screenPaths, stepMs) {
+async function executeMultiDragPath(screenPaths, stepMs, screenshotAfterSpin, pauseMs = 150) {
   try { execSync('adb shell su -c "pkill -f MaaTouch"', { stdio: 'pipe' }); } catch { /* none running */ }
   const p = spawn('adb', ['shell', 'CLASSPATH=/data/local/tmp/maatouch app_process / com.shxyke.MaaTouch.App'], { stdio: ['pipe', 'ignore', 'ignore'] });
   await sleep(1500); // MaaTouch boot — ONCE for the whole batch
@@ -1369,8 +1458,13 @@ async function executeMultiDragPath(screenPaths, stepMs) {
     const t0 = await dispatchTouchPath(w, screenPath, stepMs);
     w('u 0'); w('c');
     totalMs += performance.now() - t0;
-    await sleep(150); // UNVERIFIED — see doc comment above
+    await sleep(pauseMs);
   }
+  // Capture right after the LAST release, before this function's own 2s
+  // grace sleep + forced-release cleanup below — same reasoning as
+  // executeTouchPath's fix (those steps are touch-hygiene, unrelated to the
+  // game, and run well after the fact if left before the screenshot).
+  if (screenshotAfterSpin) saveNamedScreenshot('after-spin');
   await sleep(2000); // grace: only the tail can be in flight
   p.kill();
 
@@ -1601,6 +1695,7 @@ async function main() {
   const dry = process.argv.includes('--dry');
   const checkOnly = process.argv.includes('--check');
   const afterSpinKill = process.argv.includes('--after-spin-kill');
+  const screenshotAfterSpin = process.argv.includes('--screenshot-after-spin');
   const boardFile = argValue('--board');
   let rounds = Math.max(1, Math.floor(Number(argValue('--rounds') ?? 1) || 1));
   if ((dry || checkOnly || boardFile) && rounds > 1) {
@@ -2173,11 +2268,14 @@ async function main() {
     // parallel.js). Default = cores-1; 1 = exact sequential solve. The beam
     // is PARTITIONED per worker (beamWidth/N each), so results can differ
     // slightly from --workers 1 in either direction — wall time ~1/N.
-    // RearrangeSolver is sequential-only for v1 (P50) — --workers is
-    // accepted but has no effect in --rearrange mode.
+    // RearrangeSolver itself (plain --rearrange, no --convert) is still
+    // sequential-only (P50) — the single-component beam search has no
+    // natural item-list to shard the way DoraSolver/TargetPlanner do.
+    // --rearrange + --convert DOES shard now (P57): solveRearrangeConvertAware's
+    // conversionCandidates loop distributes across a persistent worker pool.
     const workers = Math.max(1, Number(argValue('--workers') ?? 0) || defaultWorkers());
-    if (!rearrangeMode) {
-      console.log(`[TOS] WORKERS=${workers}` + (workers > 1 ? ` (beam sharded ~${Math.ceil(Number(argValue('--beam') ?? 200) / workers)}/worker; --workers 1 for exact sequential)` : ''));
+    if (!rearrangeMode || convertType !== null) {
+      console.log(`[TOS] WORKERS=${workers}` + (workers > 1 ? ` (${rearrangeMode ? 'conversion candidates sharded across a persistent pool' : `beam sharded ~${Math.ceil(Number(argValue('--beam') ?? 200) / workers)}/worker`}; --workers 1 for exact sequential)` : ''));
     }
     const t0 = Date.now();
     let sol, engine, rearrangeDrags = null;
@@ -2218,12 +2316,27 @@ async function main() {
         // up to `conversionCandidates` (default 24) tried candidates costs
         // a full solve, so this can take several seconds to tens of
         // seconds depending on the board/demand.
+        // --workers (P57, 2026-07-11, User-requested): distributes the
+        // conversionCandidates loop across worker_threads via a persistent
+        // pool (phone/parallel.js) — a small sequential prefix runs
+        // in-process first (cheap insurance for the common case where an
+        // early candidate already satisfies the demand), only fanning out
+        // to K workers once that prefix is exhausted without success.
+        // Measured live: no regression on easy/early-success boards, real
+        // ~2-2.8x speedup at workers=4/8 on genuinely hard boards where
+        // every candidate must be tried (171.6s -> 85.2s -> 61.6s). See
+        // LESSONS.md L61/L62 for the two earlier designs that DIDN'T work
+        // and why, before assuming a bigger workers count is automatically
+        // better.
         const conversionCandidates = Number(argValue('--rearrange-conversion-candidates') ?? 0) || undefined;
-        const convertResult = solveRearrangeConvertAware(board, {
+        const convertOptions = {
           ...rearrangeOptions, convertType, convertCount,
           conversionCandidates,
           coverageMaxAttempts: Number(argValue('--rearrange-coverage-attempts') ?? 0) || undefined,
-        });
+        };
+        const convertResult = workers > 1
+          ? await solveRearrangeConvertAwareParallel(board, convertOptions, workers)
+          : solveRearrangeConvertAware(board, convertOptions);
         rearrangeDrags = convertResult.drags;
         const finalSim = BoardSimulator.resolve(convertResult.board.clone(), { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
         sol = {
@@ -2632,7 +2745,12 @@ async function main() {
       // Staleness guard: the game may have moved on (attack animations, wave
       // transition) while waiting at the prompt — spinning a stale plan drags
       // on a board that no longer exists. Re-capture and re-solve on mismatch.
-      if (!boardFile) {
+      // --no-stale-check (User-requested 2026-07-12) skips this: useful when
+      // the User is confirming manually and knows the board hasn't actually
+      // moved, but a false BOARD_CHANGED keeps kicking them back into a
+      // fresh solve+confirm loop anyway (e.g. read jitter on a busy/animated
+      // board, not a real change).
+      if (!boardFile && !process.argv.includes('--no-stale-check')) {
         // quick=true (L53): skip the 18-frame electric-burst confirmation —
         // this check only needs to notice a GROSS change, not classify
         // electric cells precisely. Because of that, an electric cell on
@@ -2669,9 +2787,19 @@ async function main() {
       // avoids paying the ~1.5s boot cost per drag). No --drag-from/dwell
       // considerations apply here (both already rejected at parse time for
       // --drag-from; hazardDwellCells still meaningfully applies per-drag).
+      // Default raised 150 -> 350ms (2026-07-11, live-confirmed the old
+      // 150ms let fast drags (--move-ms 60, 22-drag run) bleed into each
+      // other: the game read consecutive drags as one continuation, so the
+      // REAL board diverged from BOARD_AFTER_ROW* starting partway through
+      // and every later drag compounded the error. This gap is independent
+      // of --move-ms — raising it does not slow down movement WITHIN a
+      // drag, only the recognition gap BETWEEN drags. Override with
+      // --rearrange-pause-ms if 350 is still not enough (or provably more
+      // than needed) on your device.
+      const pauseMs = Number(argValue('--rearrange-pause-ms') ?? 350);
       const screenPaths = rearrangeDrags.map(d => gridPathToScreenPath(d.path, stepsPerCell, dwellCells));
-      const dragMs = await executeMultiDragPath(screenPaths, stepMs);
-      console.log(`[TOS] SPIN=done drags=${rearrangeDrags.length} points=${screenPaths.reduce((n, p) => n + p.length, 0)} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} (moveMs excludes corner dwells; dragMs sums all drags, excludes inter-drag pauses)`);
+      const dragMs = await executeMultiDragPath(screenPaths, stepMs, screenshotAfterSpin, pauseMs);
+      console.log(`[TOS] SPIN=done drags=${rearrangeDrags.length} points=${screenPaths.reduce((n, p) => n + p.length, 0)} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} pauseMs=${pauseMs} (moveMs excludes corner dwells; dragMs sums all drags, excludes inter-drag pauses)`);
     } else {
       // --drag-from: prepend the card-to-board segment so the WHOLE motion
       // (card -> board -> solved path) is one continuous drag, no lift.
@@ -2683,7 +2811,7 @@ async function main() {
         ? [...cardDragPrefix(dragFromCol, stepsPerCell), ...gridPathToScreenPath(sol.path, stepsPerCell, dwellCells)]
         : gridPathToScreenPath(sol.path, stepsPerCell, dwellCells);
 
-      const dragMs = await executeTouchPath(screenPath, stepMs);
+      const dragMs = await executeTouchPath(screenPath, stepMs, screenshotAfterSpin);
       console.log(`[TOS] SPIN=done points=${screenPath.length} moveMs=${(stepMs * stepsPerCell).toFixed(1)} dragMs=${Math.round(dragMs)} (moveMs excludes corner dwells)`);
     }
 

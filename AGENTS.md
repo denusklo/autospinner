@@ -5,14 +5,13 @@
 **Intended readers:** Every Codex agent operating in this repository.
 **Source-of-truth status:** Root Codex workflow authority; current code and verified runtime evidence own application behavior.
 **Harness index:** [docs/codex-harness/00-README.md](docs/codex-harness/00-README.md)
+**Shared repository policy:** [docs/shared-harness/REPOSITORY-POLICY.md](docs/shared-harness/REPOSITORY-POLICY.md) owns cross-runtime invariants used by Codex and Claude Code. Marker: `SHARED_POLICY_AUTHORITY=docs/shared-harness/REPOSITORY-POLICY.md`
 
 ## 1. Precedence and conflicts
 
-Precedence is: system/developer policy > current explicit User instructions > closest loaded `AGENTS.md` > linked canonical harness document > task dispatch package.
+After system/developer policy and current explicit User instructions, the shared repository policy controls cross-runtime invariants; the closest loaded `AGENTS.md` controls Codex-specific rules; linked Codex-native documents and the task dispatch package follow. Root `AGENTS.override.md` must normally be absent; a temporary override requires an explicit purpose, scope, replaced rules, owner, and expiration.
 
-Root `AGENTS.override.md` must normally be absent. A temporary override requires an explicit purpose, scope, replaced rules, owner, and expiration. The validator treats an undocumented root override as an error.
-
-`CLAUDE.md` and `.claude/harness/` are legacy Claude/application sources. Search them for targeted application facts when relevant. Do not load their large facts/lessons files wholesale. For Codex orchestration, safety, retry, review, and completion, this file and `docs/codex-harness/` control when legacy text conflicts.
+`CLAUDE.md` and `.claude/harness/` contain the Claude adapter plus application facts/history. Search them for targeted application facts when relevant; never load their large facts/lessons files wholesale. The shared repository policy controls safety, retry, review, commit, evidence, and knowledge-routing invariants. This file and `docs/codex-harness/` own Codex-specific models, tools, hooks, agents, and procedures.
 
 ## 2. Hard repository boundary
 
@@ -38,7 +37,7 @@ Plain Git may fail because repository ownership differs from the current SID. Us
 ## 3. Start every task
 
 1. Verify root/branch/status and separate pre-existing User changes.
-2. Classify the task and read only the smallest relevant source.
+2. Read the shared repository policy, classify the task, and load only the smallest relevant native/application source.
 3. Trace/reproduce current behavior and search [lessons/PITFALLS.md](docs/codex-harness/lessons/PITFALLS.md).
 4. Define in/out scope, acceptance, commands, and line/file budget.
 5. Dispatch only when section 6 thresholds apply.
@@ -68,6 +67,7 @@ Report what was recognized and let the User validate ambiguous game semantics be
 
 | Decision | Canonical source |
 |---|---|
+| Cross-runtime safety, retry, review, commit, evidence, or knowledge invariant | `docs/shared-harness/REPOSITORY-POLICY.md` |
 | Harness failure modes/control mapping | `docs/codex-harness/01-HARNESS-LEAK-DIAGNOSIS.md` |
 | Tier, dispatch, retry, escalation, independent acceptance | `docs/codex-harness/02-MODEL-DISPATCH-PROTOCOL.md` |
 | Stop/abandon, completion, or User question | `docs/codex-harness/03-JUDGMENT-EXTERNALIZATION-MATRIX.md` |
@@ -78,8 +78,6 @@ Report what was recognized and let the User validate ambiguous game semantics be
 | Final checks/backups/limitations | `docs/codex-harness/08-VERIFICATION-REPORT.md` |
 | Application file map and targeted facts | `CLAUDE.md`, then relevant `.claude/harness/PROJECT-FACTS.md` section |
 | Recognition workflow | `.claude/harness/06-RECOGNITION-PROTOCOL.md`, reconciled with current code/User semantics |
-
-Current implementation and runtime observations outrank stale line numbers or historical summaries.
 
 ## 6. Commander and delegation
 
@@ -133,6 +131,7 @@ Run the narrowest relevant check and the required regression. Syntax is not beha
 node --check algorithm.js
 node verify.js
 node --check phone\autospin.js
+node docs\shared-harness\validate-shared-harness.js
 node .codex\hooks\validate-harness.js
 node .codex\hooks\test-hooks.js
 git -c safe.directory=C:/Projects/autospinner diff --check
@@ -141,7 +140,7 @@ git -c safe.directory=C:/Projects/autospinner diff --check
 - Any `algorithm.js` change requires `node verify.js` and actual exit/output evidence.
 - Other JavaScript changes require `node --check <file>` plus behavior-owning evidence.
 - Hook changes require allowed and blocked fixture tests.
-- Config/agent/skill/Markdown changes require harness validation, read-back, and fresh review.
+- Config/agent/skill/Markdown changes require harness validation, read-back, and fresh review; shared policy or native adapter changes additionally require `node docs\shared-harness\validate-shared-harness.js --self-test` and `node docs\shared-harness\validate-shared-harness.js`.
 - Live browser/ADB claims require live evidence; unavailable infrastructure must be recorded as a blocker and limitation.
 - “Tests not run” is not passing without exact command, blocker, alternative evidence, residual risk, owner, and next check.
 

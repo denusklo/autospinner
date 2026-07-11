@@ -3,6 +3,8 @@
 > Purpose: turn "experienced intuition" into checklists a weak model can compare against by eye. Each entry = check question + perfect positive example + typical negative example.
 > When to use: when stuck, when about to declare completion, when tempted to keep retrying — come here and check against the table first, then act.
 
+> Shared authority: [`docs/shared-harness/REPOSITORY-POLICY.md`](../../docs/shared-harness/REPOSITORY-POLICY.md) owns cross-runtime completion, review, retry, and circuit-breaker invariants. This file supplies Claude-specific examples and may be stricter but never weaker.
+
 ## Matrix One: Change-Path Signals (stop and switch paths instead of retrying in place)
 
 ### R1-1 Second change to the same function with no new evidence
@@ -34,10 +36,10 @@
 Every checkmark must carry an **evidence pointer** (command output, file:line, or the User's exact words). A checkmark without evidence = not checked.
 
 - [ ] **DoD-1 Acceptance criteria checked one by one**: every acceptance criterion in the work order has PASS evidence.
-- [ ] **DoD-2 Verification was "actually run"**: the Node command output is actually pasted, not described (see CLAUDE.md R2). Browser tasks: a ≤3-step verification guide for the User has been produced + the expected `[TOS]` log content, explicitly marked "not verified in a real browser".
-- [ ] **DoD-3 Isolated acceptance passed**: the fresh-context verifier reported PASS (rules 01, section 5). Single-file changes of ≤20 lines are exempt, but DoD-2 is not exempt.
+- [ ] **DoD-2 Verification was "actually run"**: the Node command output is actually pasted, not described (see CLAUDE.md R2). A browser guide plus expected `[TOS]` output is explicitly `PARTIALLY VERIFIED`, not observed live behavior.
+- [ ] **DoD-3 Isolated acceptance passed**: a distinct fresh-context, read-only verifier reported PASS from disk state (rules 01, section 5). There is no line-count or file-count exemption.
 - [ ] **DoD-4 No collateral damage**: `git diff` contains only changes related to this task; when changing `algorithm.js`, the untouched solvers' outputs on the test boards are identical to before the change.
-- [ ] **DoD-5 Knowledge written back**: new facts → PROJECT-FACTS.md; pitfalls hit → LESSONS.md (CLAUDE.md R5).
+- [ ] **DoD-5 Knowledge written back**: new application facts → targeted PROJECT-FACTS.md sections; application/Claude history → LESSONS.md; cross-runtime workflow pitfalls → `docs/codex-harness/lessons/PITFALLS.md` (CLAUDE.md R5).
 - **Perfect positive example**: "DoD-2 evidence: `node verify.js` output `10/10 boards OK, combos: [4,3,5,...]` (pasted above). DoD-4 evidence: diff is only algorithm.js:210-241."
 - **Typical negative example**: "Changes completed and tests passed; code quality is good." (Zero evidence pointers — none of the five checkmarks count.)
 
@@ -45,7 +47,7 @@ Every checkmark must carry an **evidence pointer** (command output, file:line, o
 
 If any one triggers → stop and ask using the fixed format: **"current state in one sentence / blocker in one sentence / 2-3 concrete options (each with its cost) / my recommendation"**.
 
-- **C1 Retries exhausted**: the escalation chain is complete (rules 01, section 4) and Opus also failed 2 rounds. → Circuit-break with the full failure trail attached.
+- **C1 Retries exhausted**: the escalation chain is complete and the strongest Claude tier failed two materially different attempts for the same retry key. → Circuit-break with the full failure trail attached.
 - **C2 Requirement ambiguity with major divergence**: the same requirement sentence has ≥2 readings, and the rework cost of going the wrong way > the cost of asking.
   - Perfect positive example: "'Make it spin faster' could mean (a) shorten the drag animation time (b) shorten the solver computation time (c) reduce the number of movement steps. The three change different files — please choose."
   - Typical negative example: Guessing (a) and finishing it, when the User wanted (b). (When the ambiguity is small, reversible, and obvious from context, do not ask — over-asking is also a failure.)

@@ -1,7 +1,7 @@
 // Regression + verification suite for algorithm.js (run: `node verify.js`)
 // This is the canonical check required by CLAUDE.md R2 before shipping any
 // algorithm.js change. Exit code 0 = all pass.
-const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap} =
+const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, computeMovableComponents, enumerateConversionCandidates, orderConversionCandidatesByBound, computeMaxFirstRunesBound, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap} =
   require('./algorithm.js');
 
 let failures = 0;
@@ -1748,6 +1748,106 @@ const REA_BOARD = () => mk([
   const ca2Sim = BoardSimulator.resolve(ca2.board.clone());
   const darkTotal = caBoard2.grid.reduce((n, row) => n + row.filter(v => v === 4).length, 0);
   check('CA2 clear-all composes with conversion (ALL darks cleared)', ca2Sim.firstClearedByType[4], darkTotal);
+}
+
+// --- P59: convert-aware speed pass — firstRunes bound, candidate
+// ordering, and the planner-first/budget-pruned loop. The bound must be an
+// OVERESTIMATE-safe cap (never below what any rearrangement can actually
+// dissolve in wave 1); pruning correctness rests entirely on that
+// direction, so PB1 pins it from several angles.
+{
+  // PB1a: 2 stranded Fire runes (count < 3, can never dissolve) cap a full
+  // 6x5 board at 28.
+  const pbBoard = mk([
+    [0, 4, 2, 3, 4, 2],
+    [3, 0, 0, 4, 5, 5],
+    [4, 5, 5, 4, 5, 4],
+    [4, 1, 0, 0, 3, 1],
+    [3, 5, 0, 4, 2, 2],
+  ]);
+  check('PB1a bound: 2 stranded Fire cap the board at 28', computeMaxFirstRunesBound(pbBoard, {}), 28);
+  // PB1b: with Fire as a twoMatch type (dissolves at a run of 2), the same
+  // board bounds at the full 30.
+  check('PB1b bound: twoMatch Fire lifts the cap to 30', computeMaxFirstRunesBound(pbBoard, {twoMatch: [1]}), 30);
+  // PB1c: firstWaveNoTypes excludes that color's count entirely (7 Water
+  // here on top of the 2 Fire).
+  const waterCount = pbBoard.grid.reduce((n, row) => n + row.filter(v => v === 0).length, 0);
+  check('PB1c bound: first-wave-no Water excludes its count', computeMaxFirstRunesBound(pbBoard, {firstWaveNoTypes: [0]}), 28 - waterCount);
+  // PB1d: sealed columns cap dissolution ROOM regardless of colors — a
+  // uniform-friendly board with both edge columns sealed bounds at 20.
+  const pbUniform = mk([
+    [0, 0, 0, 1, 1, 1],
+    [2, 2, 2, 3, 3, 3],
+    [4, 4, 4, 5, 5, 5],
+    [0, 0, 0, 1, 1, 1],
+    [2, 2, 2, 3, 3, 3],
+  ]);
+  check('PB1d bound: sealed cols 0/5 cap room at 20', computeMaxFirstRunesBound(pbUniform, {sealedColumns: [0, 5]}), 20);
+
+  // PB2: orderConversionCandidatesByBound is sorted descending and carries
+  // every enumerated candidate through untouched.
+  const movable = computeMovableComponents(pbBoard, null).flat();
+  const raw = enumerateConversionCandidates(pbBoard, movable, 12);
+  const ordered = orderConversionCandidatesByBound(pbBoard, raw, {convertType: 2});
+  check('PB2 ordering keeps every candidate', ordered.length, raw.length);
+  check('PB2 ordering is bound-descending',
+    ordered.every((c, i) => i === 0 || ordered[i - 1].bound >= c.bound), true);
+
+  // PB3: the pruned loop still finds a satisfying exact full-clear when one
+  // exists (the 2026-07-11 live success board), and the result replays
+  // exactly — the planner-first fast path must not break the P56 replay
+  // guarantee.
+  const pbOk = mk([
+    [3, 2, 1, 2, 0, 1],
+    [4, 4, 0, 1, 2, 4],
+    [2, 0, 2, 0, 5, 4],
+    [1, 1, 3, 5, 3, 5],
+    [1, 4, 4, 2, 1, 1],
+  ]);
+  const pb3 = solveRearrangeConvertAware(pbOk, {
+    convertType: 2, convertCount: Infinity,
+    minFirstRunes: 30, exactFirstRunes: true,
+    rearrangeBeamWidth: 20, rearrangeMaxSteps: 10, conversionCandidates: 24,
+  });
+  const pb3Sim = BoardSimulator.resolve(pb3.board.clone());
+  check('PB3 pruned loop still satisfies exact 30', pb3Sim.firstRunes, 30);
+  const pb3Replay = pbOk.clone();
+  pb3.drags.forEach((d, di) => {
+    let cur = d.path[0];
+    for (let i = 1; i < d.path.length; i++) {
+      const nxt = d.path[i];
+      if (di === 0) applyDragSwap(pb3Replay, cur.x, cur.y, nxt.x, nxt.y, i, 2, Infinity);
+      else pb3Replay.swap(cur.x, cur.y, nxt.x, nxt.y);
+      cur = nxt;
+    }
+  });
+  let pb3Matches = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (pb3Replay.get(x, y) !== pb3.board.get(x, y)) pb3Matches = false;
+  check('PB3 planner-first result replays exactly', pb3Matches, true);
+
+  // PB4: a structurally infeasible exact demand (pbBoard caps at 28 < 30
+  // for every straight-corridor candidate) neither hangs nor returns
+  // nothing: the budgeted best-effort baseline exists, and it too replays
+  // exactly.
+  const pb4 = solveRearrangeConvertAware(pbBoard, {
+    convertType: 2, convertCount: Infinity,
+    minFirstRunes: 30, exactFirstRunes: true,
+    rearrangeBeamWidth: 20, rearrangeMaxSteps: 10, conversionCandidates: 12,
+  });
+  check('PB4 infeasible demand still yields a best-effort plan', pb4.drags.length > 0, true);
+  const pb4Replay = pbBoard.clone();
+  pb4.drags.forEach((d, di) => {
+    let cur = d.path[0];
+    for (let i = 1; i < d.path.length; i++) {
+      const nxt = d.path[i];
+      if (di === 0) applyDragSwap(pb4Replay, cur.x, cur.y, nxt.x, nxt.y, i, 2, Infinity);
+      else pb4Replay.swap(cur.x, cur.y, nxt.x, nxt.y);
+      cur = nxt;
+    }
+  });
+  let pb4Matches = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (pb4Replay.get(x, y) !== pb4.board.get(x, y)) pb4Matches = false;
+  check('PB4 best-effort result replays exactly', pb4Matches, true);
 }
 
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---

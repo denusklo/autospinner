@@ -25,7 +25,7 @@
 
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const os = require('os');
-const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, computeMovableComponents, enumerateConversionCandidates, buildConvertedBoard, applyDragSwap, solveMaxFirstCombos, computeMaxFirstCombosBound, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, computeMovableComponents, enumerateConversionCandidates, buildConvertedBoard, orderConversionCandidatesByBound, applyDragSwap, solveMaxFirstCombos, computeMaxFirstCombosBound, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
 
 /** Leave one core for the OS/adb; at least 1. Override with --workers. */
 function defaultWorkers() {
@@ -233,20 +233,47 @@ function rearrangeConvertDemandMissed(sim, opts, clearTotals) {
 // sequential prefix AND the worker-side message handler (same module,
 // loaded fresh in both the main thread and every worker), so the two never
 // drift out of sync the way hand-duplicated copies would.
-function evaluateRearrangeConvertCandidate(board, opts, clearTotals, path) {
+//
+// P59 shape, mirroring solveRearrangeConvertAware's loop exactly: for
+// rune-count demands the cheap RearrangeCoveragePlanner runs FIRST (its
+// solutions are exactly realizable, and live profiling put it at ~0.4s vs
+// ~31-35s for a beam-160 RearrangeSolver pass); the expensive beam runs
+// only when the planner missed AND the master granted `allowExpensive`
+// (withheld for bound-doomed candidates once the best-effort budget is
+// spent). Returns `{path, empty: true}` when nothing was produced.
+function evaluateRearrangeConvertCandidate(board, opts, clearTotals, path, allowExpensive = true) {
   const convertedBoard = buildConvertedBoard(board, path, opts.convertType);
-  const rsResult = new RearrangeSolver(convertedBoard, opts).solve();
-  let candidateBoard = rsResult.board, engine = 'RearrangeSolver';
-  let sim = BoardSimulator.resolve(rsResult.board.clone(), opts);
-  if (rearrangeConvertDemandMissed(sim, opts, clearTotals)) {
+  const minRunes = opts.minFirstRunes ?? 0;
+  const missed = s => rearrangeConvertDemandMissed(s, opts, clearTotals);
+  let candidateBoard = null, engine = null, sim = null;
+
+  if (minRunes > 0) { // planner-first fast path
     const planned = new RearrangeCoveragePlanner(convertedBoard, opts).solve();
     if (planned.solution) {
-      const plannerSim = BoardSimulator.resolve(planned.solution.board.clone(), opts);
-      if (!rearrangeConvertDemandMissed(plannerSim, opts, clearTotals) || plannerSim.firstRunes > sim.firstRunes) {
-        candidateBoard = planned.solution.board; engine = 'RearrangeCoveragePlanner'; sim = plannerSim;
-      }
+      candidateBoard = planned.solution.board; engine = 'RearrangeCoveragePlanner';
+      sim = BoardSimulator.resolve(planned.solution.board.clone(), opts);
     }
   }
+
+  if ((sim === null || missed(sim)) && allowExpensive) {
+    const rsResult = new RearrangeSolver(convertedBoard, opts).solve();
+    let rsSim = BoardSimulator.resolve(rsResult.board.clone(), opts);
+    if (minRunes === 0 && missed(rsSim)) {
+      // original order for non-rune-count demands: planner only as escalation
+      const planned = new RearrangeCoveragePlanner(convertedBoard, opts).solve();
+      if (planned.solution) {
+        const plannerSim = BoardSimulator.resolve(planned.solution.board.clone(), opts);
+        if (!missed(plannerSim) || plannerSim.firstRunes > rsSim.firstRunes) {
+          candidateBoard = planned.solution.board; engine = 'RearrangeCoveragePlanner'; sim = plannerSim;
+          rsSim = null;
+        }
+      }
+    }
+    if (rsSim !== null && (sim === null || !missed(rsSim) || (missed(sim) && rsSim.firstRunes > sim.firstRunes))) {
+      candidateBoard = rsResult.board; engine = 'RearrangeSolver'; sim = rsSim;
+    }
+  }
+  if (sim === null) return { path, empty: true };
   return {
     path, board: candidateBoard.grid, engine,
     sim: { firstCombos: sim.firstCombos, firstAttrCombos: sim.firstAttrCombos, firstRunes: sim.firstRunes, firstClearedByType: sim.firstClearedByType },
@@ -303,7 +330,13 @@ function solveRearrangeConvertAwareParallel(board, options = {}, workers = defau
   const convertType = opts.convertType;
   const convertCount = opts.convertCount ?? Infinity;
   const maxCandidates = opts.conversionCandidates ?? 24;
-  const candidates = enumerateConversionCandidates(board, movableCells, maxCandidates);
+  // Bound-ordered + bound-pruned exactly like the sequential function (P59)
+  // — same skip proof applies (see solveRearrangeConvertAware's loop): a
+  // skipped candidate can neither satisfy a minFirstRunes demand nor beat
+  // the incumbent best-effort, so parallel and sequential stay
+  // answer-quality-equivalent, just faster.
+  const candidates = orderConversionCandidatesByBound(board,
+    enumerateConversionCandidates(board, movableCells, maxCandidates), opts);
 
   if (candidates.length === 0) {
     // Same degenerate fallback as the sequential function (no candidates
@@ -322,6 +355,7 @@ function solveRearrangeConvertAwareParallel(board, options = {}, workers = defau
 
   let best = null, bestSim = null, bestPath = null, bestEngine = null;
   const record = r => {
+    if (r.empty) return false; // doomed candidate, beam budget withheld, planner found nothing
     const stillMissed = demandMissed(r.sim);
     const better = bestSim === null
       || (!stillMissed && demandMissed(bestSim))
@@ -341,10 +375,27 @@ function solveRearrangeConvertAwareParallel(board, options = {}, workers = defau
   // insurance against that common case; only once the prefix is exhausted
   // WITHOUT success do we know this is a genuinely hard/exhaustive board,
   // which is exactly the case where fanning out actually pays off.
+  // P59 bound prune + expensive-beam budget, shared shape with the
+  // sequential loop (see solveRearrangeConvertAware's loop comment for the
+  // safety proof). bestSim is read FRESH on every call (it tightens as
+  // results land), so later candidates prune more aggressively than earlier
+  // ones — including mid-flight in the worker dispatch loop below.
+  const minRunes = opts.minFirstRunes ?? 0;
+  const doomed = c => minRunes > 0 && c.bound < minRunes;
+  const prunable = c => doomed(c) && bestSim !== null && bestSim.firstRunes >= c.bound;
+  let expensiveBudget = 1;
+  const grantExpensive = c => {
+    if (!doomed(c)) return true;
+    if (expensiveBudget > 0) { expensiveBudget--; return true; }
+    return false;
+  };
+
   const PREFIX = Math.min(4, candidates.length);
   let prefixTried = 0;
   for (; prefixTried < PREFIX; prefixTried++) {
-    const r = evaluateRearrangeConvertCandidate(board, opts, clearTotals, candidates[prefixTried]);
+    const c = candidates[prefixTried];
+    if (prunable(c)) continue;
+    const r = evaluateRearrangeConvertCandidate(board, opts, clearTotals, c.path, grantExpensive(c));
     if (record(r)) { prefixTried += 1; break; }
   }
   const remaining = candidates.slice(prefixTried);
@@ -368,8 +419,10 @@ function solveRearrangeConvertAwareParallel(board, options = {}, workers = defau
     };
     const dispatchNext = w => {
       if (settled.has(w)) return;
+      while (!stop && nextIndex < remaining.length && prunable(remaining[nextIndex])) nextIndex++;
       if (stop || nextIndex >= remaining.length) { settle(w); return; }
-      w.postMessage({ path: remaining[nextIndex++] });
+      const c = remaining[nextIndex++];
+      w.postMessage({ path: c.path, allowExpensive: grantExpensive(c) });
     };
     for (let i = 0; i < K; i++) {
       const w = new Worker(__filename, {
@@ -642,7 +695,7 @@ if (!isMainThread && workerData && workerData.mode === 'rearrange-convert-worker
     if (bt >= 0 && bt < FROZEN) clearTotals[bt]++;
   }
   parentPort.on('message', msg => {
-    parentPort.postMessage(evaluateRearrangeConvertCandidate(board, opts, clearTotals, msg.path));
+    parentPort.postMessage(evaluateRearrangeConvertCandidate(board, opts, clearTotals, msg.path, msg.allowExpensive ?? true));
   });
 }
 

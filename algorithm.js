@@ -3427,6 +3427,71 @@ function buildConvertedBoard(originalBoard, path, convertType) {
 }
 
 /**
+ * UPPER bound on how many runes ANY single first wave can dissolve on any
+ * rearrangement of `board` (P59 speed pass for solveRearrangeConvertAware —
+ * the firstRunes sibling of computeMaxFirstCombosBound). Two independent
+ * caps, both deliberately OVERESTIMATE-safe (the bound may exceed what is
+ * actually reachable, but must never undercut it — pruning correctness
+ * depends only on that direction):
+ *   - color cap: a color whose dissolvable-rune count is below its minimum
+ *     run length (3, or 2 for twoMatch types) can never dissolve AT ALL, so
+ *     it contributes 0; otherwise it contributes its full count (geometry
+ *     ignored — overestimate-safe). Excluded from counts entirely: FROZEN
+ *     and cursed runes (never dissolve, per-rune), noSolvableTypes, and
+ *     firstWaveNoTypes (may not dissolve in wave 1 — which is exactly the
+ *     wave firstRunes measures).
+ *   - position cap: cells where dissolution can never HAPPEN (sealed
+ *     columns, NO_DISSOLVE flags, hazardPositions) don't count as
+ *     dissolution room, no matter what rune is rearranged into them.
+ * The shield survivor-floor (P30) is deliberately NOT modeled (it could
+ * only LOWER the true maximum — ignoring it keeps the bound an
+ * overestimate, just a slightly looser one).
+ */
+function computeMaxFirstRunesBound(board, options = {}) {
+  const sealedColumns = options.sealedColumns ?? [];
+  const flags = options.flags ?? null;
+  const twoMatch = options.twoMatch ?? null;
+  const firstWaveNoTypes = options.firstWaveNoTypes ?? [];
+  const noSolvableTypes = options.noSolvableTypes ?? [];
+  const hazardKeys = options.hazardPositions ? new Set(options.hazardPositions.map(p => p.x * 10 + p.y)) : null;
+  const flag = (x, y) => flags === null ? 0 : flags[y][x];
+  const counts = Array(6).fill(0);
+  let resolvableCells = 0;
+  for (let y = 0; y < board.height; y++) {
+    for (let x = 0; x < board.width; x++) {
+      const v = board.get(x, y);
+      const t = baseType(v);
+      if (v >= 0 && v !== FROZEN && !isCursed(v)
+          && !noSolvableTypes.includes(t) && !firstWaveNoTypes.includes(t)) counts[t]++;
+      if (!sealedColumns.includes(x) && (flag(x, y) & CELL_FLAGS.NO_DISSOLVE) === 0
+          && (hazardKeys === null || !hazardKeys.has(x * 10 + y))) resolvableCells++;
+    }
+  }
+  const colorBound = counts.reduce((s, c, t) =>
+    s + (c >= ((twoMatch && twoMatch.includes(t)) ? 2 : 3) ? c : 0), 0);
+  return Math.min(colorBound, resolvableCells);
+}
+
+/**
+ * Order conversion candidates for solveRearrangeConvertAware's loop:
+ * compute each candidate's post-conversion firstRunes bound (cheap — a
+ * board clone + one 30-cell count, vs the FULL RearrangeSolver +
+ * RearrangeCoveragePlanner solve the loop pays per candidate) and sort
+ * best-bound-first. Two payoffs, both pure speed (result quality can only
+ * improve — see the skip proof in solveRearrangeConvertAware's loop):
+ * satisfiable demands hit their early-exit sooner (the corridor that
+ * repairs a stranded minority color is exactly the one with the highest
+ * bound), and unsatisfiable ones let the loop's bound-vs-best skip prune
+ * nearly every candidate without solving it.
+ * @returns {Array<{path, bound}>} sorted by bound descending
+ */
+function orderConversionCandidatesByBound(board, candidatePaths, options) {
+  return candidatePaths
+    .map(path => ({path, bound: computeMaxFirstRunesBound(buildConvertedBoard(board, path, options.convertType), options)}))
+    .sort((a, b) => b.bound - a.bound);
+}
+
+/**
  * Convert-AWARE joint solver for --rearrange + --convert (P56, 2026-07-11
  * — supersedes P55's "choose target, then patch first-drag around it"
  * approach, which exhaustive testing PROVED has a real ceiling: since a
@@ -3454,15 +3519,16 @@ function buildConvertedBoard(originalBoard, path, convertType) {
  * "available supply" for phase 2 IS exactly the post-conversion board by
  * construction, not an aspiration about it).
  *
- * COST (correctness-first per User's explicit direction — "if it works
- * then we optimize speed from there"): runs a full solve (cheap
+ * COST (P59 speed pass, 2026-07-12 — the pass the original
+ * correctness-first version explicitly deferred): a full solve (cheap
  * RearrangeSolver pass, sometimes an expensive RearrangeCoveragePlanner
- * escalation) for EVERY candidate tried (default up to 24), so wall time
- * scales roughly linearly with candidate count. Early-exits the instant
- * any candidate fully satisfies the demand — UNVERIFIED how often that
- * happens early vs exhausts the whole candidate list live; this is
- * exactly the profiling work the speed-optimization pass should start
- * from.
+ * escalation, measured up to ~36s/candidate live on beam 160/steps 60)
+ * still runs per candidate TRIED, but candidates are now bound-ordered
+ * (orderConversionCandidatesByBound) and bound-pruned (see the loop) when
+ * a minFirstRunes demand is present, so satisfiable demands early-exit on
+ * one of the first candidates and infeasible ones skip nearly the whole
+ * list. Without a minFirstRunes demand nothing is pruned (the bound says
+ * nothing about combo-count demands) — only the ordering applies.
  *
  * @param {Board} board the ORIGINAL board (before any drags)
  * @param {object} options same shape RearrangeSolver/RearrangeCoveragePlanner
@@ -3479,7 +3545,8 @@ function solveRearrangeConvertAware(board, options = {}) {
   const convertType = options.convertType;
   const convertCount = options.convertCount ?? Infinity;
   const maxCandidates = options.conversionCandidates ?? 24;
-  const candidates = enumerateConversionCandidates(board, movableCells, maxCandidates);
+  const candidates = orderConversionCandidatesByBound(board,
+    enumerateConversionCandidates(board, movableCells, maxCandidates), options);
 
   const clearTotals = t => board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t || v === CURSE_BASE + t).length, 0);
   const demandMissed = sim =>
@@ -3489,21 +3556,63 @@ function solveRearrangeConvertAware(board, options = {}) {
     (options.clearTypes ?? []).some(t => sim.firstClearedByType[t] < clearTotals(t)) ||
     (options.firstWaveHaveTypes ?? []).some(t => sim.firstClearedByType[t] === 0);
 
+  // P59 speed pass (2026-07-12, live-profiled): on the User's real 370s
+  // ABORT board, the per-candidate cost split was RearrangeSolver ~31-35s
+  // (the caller's rearrangeBeamWidth/rearrangeMaxSteps apply INSIDE every
+  // candidate solve) vs RearrangeCoveragePlanner ~0.4s — and on the
+  // success board it was the PLANNER, not the beam, that produced the
+  // winning full-clear. So for rune-count demands (minFirstRunes > 0):
+  //   1. planner runs FIRST per candidate (cheap, and its solutions are
+  //      exactly realizable) — if it satisfies the demand, the expensive
+  //      beam never runs at all;
+  //   2. a candidate whose bound proves the demand unreachable ("doomed")
+  //      gets the expensive beam only while expensiveBudget lasts (one
+  //      full-quality best-effort baseline for the ABORT report), then
+  //      only the cheap planner;
+  //   3. the original absolute skip: doomed AND provably can't beat the
+  //      incumbent best-effort (sim.firstRunes <= bound always, and ties
+  //      don't replace `best`) → skip entirely. Never fires before a
+  //      first candidate is held, so a best-effort result always exists.
+  // Demands WITHOUT minFirstRunes keep the original RS-first order and
+  // never prune (the bound says nothing about combo-count demands).
   let best = null, bestSim = null, bestPath = null, bestEngine = null;
-  for (const path of candidates) {
+  const minRunes = options.minFirstRunes ?? 0;
+  let expensiveBudget = 1;
+  for (const {path, bound} of candidates) {
+    const doomed = minRunes > 0 && bound < minRunes;
+    if (doomed && bestSim !== null && bestSim.firstRunes >= bound) continue;
     const convertedBoard = buildConvertedBoard(board, path, convertType);
-    const rsResult = new RearrangeSolver(convertedBoard, options).solve();
-    let candidateResult = rsResult, candidateEngine = 'RearrangeSolver';
-    let sim = BoardSimulator.resolve(rsResult.board.clone(), options);
-    if (demandMissed(sim)) {
+    let candidateResult = null, candidateEngine = null, sim = null;
+
+    if (minRunes > 0) { // planner-first fast path
       const planned = new RearrangeCoveragePlanner(convertedBoard, options).solve();
       if (planned.solution) {
-        const plannerSim = BoardSimulator.resolve(planned.solution.board.clone(), options);
-        if (!demandMissed(plannerSim) || plannerSim.firstRunes > sim.firstRunes) {
-          candidateResult = planned.solution; candidateEngine = 'RearrangeCoveragePlanner'; sim = plannerSim;
-        }
+        candidateResult = planned.solution; candidateEngine = 'RearrangeCoveragePlanner';
+        sim = BoardSimulator.resolve(planned.solution.board.clone(), options);
       }
     }
+
+    if ((sim === null || demandMissed(sim)) && (!doomed || expensiveBudget > 0)) {
+      if (doomed) expensiveBudget--;
+      const rsResult = new RearrangeSolver(convertedBoard, options).solve();
+      let rsSim = BoardSimulator.resolve(rsResult.board.clone(), options);
+      if (minRunes === 0 && demandMissed(rsSim)) {
+        // original order for non-rune-count demands: planner only as escalation
+        const planned = new RearrangeCoveragePlanner(convertedBoard, options).solve();
+        if (planned.solution) {
+          const plannerSim = BoardSimulator.resolve(planned.solution.board.clone(), options);
+          if (!demandMissed(plannerSim) || plannerSim.firstRunes > rsSim.firstRunes) {
+            candidateResult = planned.solution; candidateEngine = 'RearrangeCoveragePlanner'; sim = plannerSim;
+            rsSim = null;
+          }
+        }
+      }
+      if (rsSim !== null && (sim === null || !demandMissed(rsSim) || (demandMissed(sim) && rsSim.firstRunes > sim.firstRunes))) {
+        candidateResult = rsResult; candidateEngine = 'RearrangeSolver'; sim = rsSim;
+      }
+    }
+    if (sim === null) continue; // doomed, budget spent, planner found nothing
+
     const stillMissed = demandMissed(sim);
     const better = bestSim === null
       || (!stillMissed && demandMissed(bestSim))
@@ -3622,5 +3731,5 @@ function solveMaxFirstCombos(board, options = {}) {
 
 // Export for use in content script
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, computeMovableComponents, enumerateConversionCandidates, buildConvertedBoard, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap};
+  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, computeMovableComponents, enumerateConversionCandidates, buildConvertedBoard, orderConversionCandidatesByBound, computeMaxFirstRunesBound, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap};
 }

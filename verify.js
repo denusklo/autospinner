@@ -1,7 +1,7 @@
 // Regression + verification suite for algorithm.js (run: `node verify.js`)
 // This is the canonical check required by CLAUDE.md R2 before shipping any
 // algorithm.js change. Exit code 0 = all pass.
-const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap} =
+const {Board, MatchFinder, ComboMaximizer, BeamSearchSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, solveMaxFirstCombos, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap} =
   require('./algorithm.js');
 
 let failures = 0;
@@ -1318,7 +1318,7 @@ const REA_BOARD = () => mk([
   const board = REA_BOARD();
   const baselineSim = BoardSimulator.resolve(board.clone());
   check('REA3 baseline board has no wave-1 matches at all', baselineSim.totalCombos, 0);
-  const rs3 = new RearrangeSolver(board, { clearTypes: [0], rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const rs3 = new RearrangeSolver(board, { clearTypes: [0], rearrangeBeamWidth: 60, rearrangeMaxSteps: 15 });
   const result3 = rs3.solve();
   const sim3 = BoardSimulator.resolve(result3.board.clone());
   check('REA3 rearranged board clears all 3 waters in wave 1', sim3.firstClearedByType[0], 3);
@@ -1329,7 +1329,7 @@ const REA_BOARD = () => mk([
 // reproduces the chosen target board (ground truth for real execution).
 {
   const board = REA_BOARD();
-  const rs4 = new RearrangeSolver(board, { wantGroupType: 1, wantGroupSize: 5, rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const rs4 = new RearrangeSolver(board, { wantGroupType: 1, wantGroupSize: 5, rearrangeBeamWidth: 60, rearrangeMaxSteps: 15 });
   const result4 = rs4.solve();
   const decomposed4 = decomposeRearrangement(board, result4.board, result4.movableCells);
   const drags4 = decomposed4.drags;
@@ -1348,7 +1348,7 @@ const REA_BOARD = () => mk([
   const flags5 = Array.from({length: 5}, () => Array(6).fill(0));
   flags5[2][3] = CELL_FLAGS.NO_SWAP;
   const board5 = REA_BOARD();
-  const rs5 = new RearrangeSolver(board5, { flags: flags5, clearTypes: [0], rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const rs5 = new RearrangeSolver(board5, { flags: flags5, clearTypes: [0], rearrangeBeamWidth: 60, rearrangeMaxSteps: 15 });
   const result5 = rs5.solve();
   check('REA5 immovable cell value unchanged in the target board', result5.board.get(3, 2), board5.get(3, 2));
   const drags5 = decomposeRearrangement(board5, result5.board, result5.movableCells).drags;
@@ -1373,7 +1373,7 @@ const REA_BOARD = () => mk([
     [1, 0, 9, 9, 3, 2],
     [0, 1, 9, 9, 2, 3],
   ]);
-  const rs6 = new RearrangeSolver(board6, { flags: flags6, wantGroupType: 0, wantGroupSize: 5, rearrangeBeamWidth: 200, rearrangeMaxSteps: 20 });
+  const rs6 = new RearrangeSolver(board6, { flags: flags6, wantGroupType: 0, wantGroupSize: 5, rearrangeBeamWidth: 50, rearrangeMaxSteps: 15 });
   const result6 = rs6.solve();
   const drags6 = decomposeRearrangement(board6, result6.board, result6.movableCells).drags;
   check('REA6 no drag path ever crosses the NO_SWAP wall (cols 2-3)', drags6.every(d => d.path.every(p => p.x !== 2 && p.x !== 3)), true);
@@ -1394,7 +1394,7 @@ const REA_BOARD = () => mk([
 // while the picked-up rune still rides unconverted to wherever it lands.
 {
   const board7 = REA_BOARD();
-  const rs7 = new RearrangeSolver(board7, { wantGroupType: 1, wantGroupSize: 5, rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const rs7 = new RearrangeSolver(board7, { wantGroupType: 1, wantGroupSize: 5, rearrangeBeamWidth: 60, rearrangeMaxSteps: 15 });
   const result7 = rs7.solve();
   const decomposed7 = decomposeRearrangement(board7, result7.board, result7.movableCells, 3, Infinity);
   const drags7 = decomposed7.drags;
@@ -1434,7 +1434,7 @@ const REA_BOARD = () => mk([
 // touches; a second drag (if any) is completely unaffected by conversion.
 {
   const board8 = REA_BOARD();
-  const rs8 = new RearrangeSolver(board8, { clearTypes: [0], rearrangeBeamWidth: 300, rearrangeMaxSteps: 25 });
+  const rs8 = new RearrangeSolver(board8, { clearTypes: [0], rearrangeBeamWidth: 60, rearrangeMaxSteps: 15 });
   const result8 = rs8.solve();
   const decomposed8 = decomposeRearrangement(board8, result8.board, result8.movableCells, 4, 1);
   const drags8 = decomposed8.drags;
@@ -1471,7 +1471,7 @@ const REA_BOARD = () => mk([
 // single-drag --convert + --clear-all fix) without being flagged wrong.
 {
   const board9 = REA_BOARD();
-  const rs9 = new RearrangeSolver(board9, { clearTypes: [0], rearrangeBeamWidth: 400, rearrangeMaxSteps: 25 });
+  const rs9 = new RearrangeSolver(board9, { clearTypes: [0], rearrangeBeamWidth: 60, rearrangeMaxSteps: 15 });
   const result9 = rs9.solve();
   const decomposed9 = decomposeRearrangement(board9, result9.board, result9.movableCells, 0, Infinity);
   const sim9 = BoardSimulator.resolve(decomposed9.board.clone());
@@ -1599,6 +1599,155 @@ const REA_BOARD = () => mk([
   // not claim success.
   check('CP6 provably-impossible exact target reported as a miss, not success', res6.reason, 'coverage-search-missed');
   check('CP6 no solution object on failure', res6.solution, null);
+}
+
+// --- decomposeRearrangement multi-candidate first-drag search under
+// --convert (P55, supersedes the P54 "provably safe" approach, which had a
+// genuine math error: it only accounted for INTERMEDIATE cells' original
+// values being destroyed by forced conversion, missing that the drag's own
+// DESTINATION cell's original value is ALSO destroyed — so a truly
+// zero-disruption drag is far rarer than P54 assumed, and search-and-verify
+// beats trying to prove safety in closed form). ---
+
+// DC1: the multi-candidate search is NEVER worse than the "no forced
+// choice" baseline (which is always included as one candidate) — proven by
+// construction (best-of-N always >= any single one of the N, including the
+// baseline), verified concretely on a real board.
+{
+  const dcBoard = mk([
+    [2, 3, 1, 3, 4, 1],
+    [2, 2, 0, 0, 1, 1],
+    [4, 3, 3, 2, 2, 3],
+    [0, 1, 5, 5, 4, 2],
+    [1, 1, 5, 1, 5, 5],
+  ]);
+  const dcRs = new RearrangeSolver(dcBoard, { minFirstRunes: 30, exactFirstRunes: true, rearrangeBeamWidth: 30, rearrangeMaxSteps: 15 });
+  const dcResult = dcRs.solve();
+  const dcDecomposed = decomposeRearrangement(dcBoard, dcResult.board, dcResult.movableCells, 2, Infinity);
+  const dcSim = BoardSimulator.resolve(dcDecomposed.board.clone());
+  // The target itself achieves 30; conversion unavoidably costs SOMETHING
+  // on this board (proven live: exhaustive candidate search still tops out
+  // short of 30) — the check that matters is the search recovers
+  // MEANINGFULLY more than an arbitrary/unguided first drag would (a raw
+  // regression floor, not a claim of perfection).
+  check('DC1 multi-candidate search recovers a strong majority of the target after --convert', dcSim.firstRunes >= 25, true);
+}
+
+// DC2: end-to-end realizability still holds under the multi-candidate
+// search — whichever candidate is kept, decomposeRearrangement's OWN
+// returned board must be independently reproducible by replaying its own
+// drags (ground truth, same discipline as REA4/CP5).
+{
+  const dcBoard2 = mk([
+    [0, 1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5, 0],
+    [2, 3, 4, 5, 0, 1],
+    [3, 4, 5, 0, 1, 2],
+    [4, 5, 0, 1, 2, 3],
+  ]);
+  const dcRs2 = new RearrangeSolver(dcBoard2, { minFirstRunes: 30, exactFirstRunes: true, rearrangeBeamWidth: 30, rearrangeMaxSteps: 15 });
+  const dcResult2 = dcRs2.solve();
+  const dcDecomposed2 = decomposeRearrangement(dcBoard2, dcResult2.board, dcResult2.movableCells, 2, Infinity);
+  // Only the FIRST drag ever converts: replay drag 0 with conversion,
+  // drags 1+ as plain swaps (matches decomposeRearrangementOnce's own
+  // contract exactly).
+  const replay2b = dcBoard2.clone();
+  dcDecomposed2.drags.forEach((d, di) => {
+    let cur = d.path[0];
+    for (let i = 1; i < d.path.length; i++) {
+      const nxt = d.path[i];
+      if (di === 0) applyDragSwap(replay2b, cur.x, cur.y, nxt.x, nxt.y, i, 2, Infinity);
+      else replay2b.swap(cur.x, cur.y, nxt.x, nxt.y);
+      cur = nxt;
+    }
+  });
+  let matches2 = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (replay2b.get(x, y) !== dcDecomposed2.board.get(x, y)) matches2 = false;
+  check('DC2 multi-candidate result is exactly reproducible by replaying its own drags', matches2, true);
+}
+
+// DC3: with convertType null, decomposeRearrangement's behavior is
+// UNCHANGED (single-pass, no candidate search overhead) — regression
+// guard that the P55 wrapper doesn't alter the no-convert path at all.
+{
+  const dcBoard3 = mk([
+    [0, 1, 0, 2, 0, 3],
+    [2, 3, 4, 5, 1, 2],
+    [3, 4, 5, 1, 2, 3],
+    [4, 5, 1, 2, 3, 4],
+    [5, 1, 2, 3, 4, 5],
+  ]);
+  const dcRs3 = new RearrangeSolver(dcBoard3, { wantGroupType: 1, wantGroupSize: 5, rearrangeBeamWidth: 60, rearrangeMaxSteps: 15 });
+  const dcResult3 = dcRs3.solve();
+  const dcDecomposed3 = decomposeRearrangement(dcBoard3, dcResult3.board, dcResult3.movableCells);
+  let matches3 = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (dcDecomposed3.board.get(x, y) !== dcResult3.board.get(x, y)) matches3 = false;
+  check('DC3 no-convert path still reproduces the target exactly (unaffected by P55)', matches3, true);
+}
+
+// --- solveRearrangeConvertAware (P56): convert-AWARE joint solver — bakes
+// the forced first-drag conversion into TARGET SELECTION itself, rather
+// than choosing a target first and patching around conversion (P54/P55,
+// exhaustively proven to have a real ceiling). GUARANTEED exactly
+// realizable once a satisfying candidate is found (see algorithm.js doc).
+// Tests below use SMALL solver params (beam/steps/candidates/attempts) —
+// this function is deliberately correctness-first, not yet speed-tuned
+// (User-confirmed direction), and a full-strength run costs several
+// seconds to tens of seconds per call; small params keep the SUITE fast
+// while still exercising every structural guarantee. Full-strength timing
+// and the true exact-target recovery are documented with live evidence in
+// PROJECT-FACTS P56, not re-proven here on every regression run.
+
+// CA1: ground truth — the result is EXACTLY reproducible by physically
+// replaying its own drags (first drag with real conversion applied, the
+// rest as plain swaps), on the board that originally motivated P56 (P54/
+// P55 topped out at 29/30 on this exact board; this is not a claim that a
+// SMALL-budget CA1 run also reaches 30 — only that whatever it DOES
+// return is real and correct).
+{
+  const caBoard1 = mk([
+    [2, 3, 1, 3, 4, 1],
+    [2, 2, 0, 0, 1, 1],
+    [4, 3, 3, 2, 2, 3],
+    [0, 1, 5, 5, 4, 2],
+    [1, 1, 5, 1, 5, 5],
+  ]);
+  const ca1 = solveRearrangeConvertAware(caBoard1, {
+    convertType: 2, convertCount: Infinity,
+    rearrangeBeamWidth: 20, rearrangeMaxSteps: 10, conversionCandidates: 1,
+  });
+  check('CA1 at least one drag planned', ca1.drags.length > 0, true);
+  const replay1 = caBoard1.clone();
+  ca1.drags.forEach((d, di) => {
+    let cur = d.path[0];
+    for (let i = 1; i < d.path.length; i++) {
+      const nxt = d.path[i];
+      if (di === 0) applyDragSwap(replay1, cur.x, cur.y, nxt.x, nxt.y, i, 2, Infinity);
+      else replay1.swap(cur.x, cur.y, nxt.x, nxt.y);
+      cur = nxt;
+    }
+  });
+  let matchesCA1 = true;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 6; x++) if (replay1.get(x, y) !== ca1.board.get(x, y)) matchesCA1 = false;
+  check('CA1 result is exactly reproducible by replaying its own drags', matchesCA1, true);
+}
+
+// CA2: composes with --clear-all under conversion.
+{
+  const caBoard2 = mk([
+    [4, 1, 0, 3, 2, 5],
+    [1, 4, 0, 3, 2, 5],
+    [0, 1, 4, 3, 2, 5],
+    [3, 0, 1, 4, 2, 5],
+    [2, 3, 0, 1, 4, 5],
+  ]);
+  const ca2 = solveRearrangeConvertAware(caBoard2, {
+    clearTypes: [4], convertType: 2, convertCount: Infinity,
+    rearrangeBeamWidth: 20, rearrangeMaxSteps: 10, conversionCandidates: 2, coverageMaxAttempts: 500,
+  });
+  const ca2Sim = BoardSimulator.resolve(ca2.board.clone());
+  const darkTotal = caBoard2.grid.reduce((n, row) => n + row.filter(v => v === 4).length, 0);
+  check('CA2 clear-all composes with conversion (ALL darks cleared)', ca2Sim.firstClearedByType[4], darkTotal);
 }
 
 // --- Regression: PROJECT-FACTS §4a smoke test must stay stable ---

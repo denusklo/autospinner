@@ -4,3 +4,4 @@ phone/screenshots/*.png
 phone/check.html
 phone/spin_script.txt
 .claude/settings.local.json
+*.bak.*

@@ -150,6 +150,19 @@ A task is deliverable only when every mandatory row is `PASS`. Use `NOT APPLICAB
 | TC-09 | Clean read-back | Every changed file was reopened and checked for truncation, placeholders, and wrong paths | Read-back list/status | Never |
 | TC-10 | Evidence attached | Final report lists files, commands, results, review, and limitations | Completion-evidence block | Never |
 
+### Completion examples
+
+- **TC-01:** Perfect positive example: initial/final status shows only the two approved files changed. Typical negative example: unrelated cleanup files appear only in the final diff.
+- **TC-02:** Perfect positive example: every numbered acceptance criterion maps to one observed command or artifact. Typical negative example: a prose summary says all requirements were handled without a requirement-to-evidence map.
+- **TC-03:** Perfect positive example: each changed JavaScript, JSON, and TOML file passes its actual parser. Typical negative example: the agent visually inspects syntax and calls it valid.
+- **TC-04:** Perfect positive example: the narrow test owning the changed behavior exits 0 with its expected marker. Typical negative example: only a broad unrelated test or syntax check runs.
+- **TC-05:** Perfect positive example: `node verify.js` passes after an `algorithm.js` change. Typical negative example: one focused reproduction passes but the canonical regression is skipped.
+- **TC-06:** Perfect positive example: a distinct read-only reviewer re-reads disk state and reruns checks. Typical negative example: the implementation agent performs a second self-review.
+- **TC-07:** Perfect positive example: changed durable commands and ownership rules are updated and read back. Typical negative example: behavior changes while its operating documentation stays stale.
+- **TC-08:** Perfect positive example: every Critical/High finding is corrected and re-reviewed to zero. Typical negative example: a High finding is described as an acceptable limitation.
+- **TC-09:** Perfect positive example: every changed file is reopened and checked for truncation, placeholders, and wrong paths. Typical negative example: successful patch application is treated as read-back.
+- **TC-10:** Perfect positive example: delivery lists files, commands, integer exits, observed results, reviewer, findings, and limitations. Typical negative example: delivery says only “done and tested.”
+
 ### Machine-readable outcome vocabulary
 
 Use only: `VERIFIED`, `PARTIALLY VERIFIED`, `UNVERIFIED`, `BLOCKED`, `NOT APPLICABLE`.
@@ -190,6 +203,20 @@ Stop autonomous work and ask one narrow question when any row triggers.
 | CB-10 | Unavailable infrastructure | Acceptance requires unavailable device, browser state, CI, service, or credentials | Ask the User to run one exact check or approve delivery as blocked | Attempted check and alternative evidence |
 | CB-11 | Tier A exhausted | Same retry key failed two materially different Tier A attempts | Ask whether to stop, change requirement, or authorize a named experiment | Complete failure trace |
 
+### Circuit-breaker examples
+
+- **CB-01:** Perfect positive example: show two materially different behaviors and ask the User to choose A or B. Typical negative example: guess the preferred interpretation and implement it.
+- **CB-02:** Perfect positive example: present a dry-run impact inventory and ask approval for the exact irreversible operation. Typical negative example: perform deletion or deployment because it is needed for completion.
+- **CB-03:** Perfect positive example: report the blocked privileged action and ask for an approved access path without requesting the secret in chat. Typical negative example: ask the User to paste a token.
+- **CB-04:** Perfect positive example: show the overlapping diff and ask whether to preserve, isolate, or replace it. Typical negative example: overwrite or stash the User’s work to obtain a clean tree.
+- **CB-05:** Perfect positive example: present two or three aesthetic options with observable trade-offs and ask for one choice. Typical negative example: select a design preference and describe it as objectively better.
+- **CB-06:** Perfect positive example: name the required external path and ask whether repository scope may expand. Typical negative example: write outside the repository because the artifact seems harmless.
+- **CB-07:** Perfect positive example: cite the conflicting safety rule, explain the risk, and ask which secure alternative is authorized. Typical negative example: weaken a guard to satisfy the request.
+- **CB-08:** Perfect positive example: list the installed help and official sources checked, then ask whether to use a documented alternative or pause. Typical negative example: invent an unconfirmed model, hook field, or flag.
+- **CB-09:** Perfect positive example: show the branch or code evidence contradicting the requested target and ask which source controls. Typical negative example: follow a stale task description despite current repository evidence.
+- **CB-10:** Perfect positive example: record the failed infrastructure check and ask for one exact User-run command or blocked delivery. Typical negative example: claim live browser or device behavior from static inspection.
+- **CB-11:** Perfect positive example: attach both materially different Tier A attempts and ask whether to stop, change the requirement, or authorize one named experiment. Typical negative example: start a third unapproved retry.
+
 ### Conditions that do not justify interrupting the User
 
 Do not ask merely because:
@@ -216,4 +243,4 @@ When judgment depends on ambiguous business requirements, subjective aesthetics,
 
 ## 6. Matrix verification
 
-The fresh-context reviewer must sample every AP and CB row and confirm that a literal worker can identify the signal, threshold, evidence, and destination without inventing a policy. Any missing element is at least Medium severity; a missing stop threshold or bypassable completion row is High.
+The fresh-context reviewer must sample every AP, TC, and CB row and confirm that a literal worker can identify the signal, threshold or PASS condition, required action, evidence, destination where applicable, perfect positive example, and typical negative example without inventing policy. Any missing element is at least Medium severity; a missing stop threshold, example pair, or bypassable completion row is High.

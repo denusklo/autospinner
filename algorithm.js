@@ -2654,6 +2654,72 @@ class RearrangeSolver {
 }
 
 /**
+ * Enumerate CANDIDATE first-drag paths under --convert (P55, 2026-07-11 —
+ * supersedes P54's findSafeFirstDrag, which had a real math error: it
+ * assumed a drag whose left-behind cells all have TARGET===convertType is
+ * automatically zero-disruption, but that's false. Rigorous check: forcing
+ * a cell to convertType DESTROYS whatever original value it held (the
+ * `board.set` in applyDragSwap overwrites it BEFORE the swap can preserve
+ * it — this happens even at the drag's own DESTINATION cell, not just
+ * intermediates, which P54's proof missed). A destroyed value only causes
+ * zero net disruption if it exactly matches what's being conjured
+ * (convertType) in aggregate across the whole path — a condition strong
+ * enough that it's rarely satisfiable by construction, so proving safety
+ * in closed form isn't the productive approach.
+ *
+ * Instead (per direct User steer: "why not find the best path that
+ * fulfills --first-runes N" — search for it, verify it, don't just reason
+ * about it): this returns several PLAUSIBLE candidate first drags (using
+ * the target-alignment heuristic as a filter, not a guarantee), and
+ * decomposeRearrangement tries each one for REAL — running the complete
+ * decomposition and checking how many cells actually end up matching the
+ * target — keeping whichever candidate empirically performs best. A
+ * candidate here is a signal worth trying, not a proof.
+ * @returns {Array<Array<{x,y}>>} up to `limit` candidate paths (each in
+ *   "destination -> ... -> donor" BFS order, same convention as before)
+ */
+function enumerateCandidateFirstDrags(originalBoard, targetBoard, movableCells, convertType, limit = 12) {
+  const w = originalBoard.width, h = originalBoard.height;
+  const cellKey = (x, y) => y * w + x;
+  const movableSet = new Set(movableCells.map(c => cellKey(c.x, c.y)));
+  const candidates = [];
+
+  for (const L of movableCells) {
+    if (candidates.length >= limit) break;
+    const needed = targetBoard.get(L.x, L.y);
+    if (originalBoard.get(L.x, L.y) === needed) continue; // already correct, nothing to fix here
+    const visited = new Set([cellKey(L.x, L.y)]);
+    let frontier = [{x: L.x, y: L.y, path: [{x: L.x, y: L.y}]}];
+    let found = false;
+    while (frontier.length > 0 && !found) {
+      const next = [];
+      for (const node of frontier) {
+        if (!(node.x === L.x && node.y === L.y) && originalBoard.get(node.x, node.y) === needed) {
+          candidates.push(node.path);
+          found = true;
+          break;
+        }
+        for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+          const nx = node.x + dx, ny = node.y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          const key = cellKey(nx, ny);
+          if (visited.has(key) || !movableSet.has(key)) continue;
+          // Heuristic filter, NOT a safety guarantee (see doc above):
+          // prefer routing through cells whose own target is already
+          // convertType, since those are AT LEAST individually correct
+          // afterward even though their ORIGINAL value is still lost.
+          if (targetBoard.get(nx, ny) !== convertType) continue;
+          visited.add(key);
+          next.push({x: nx, y: ny, path: [...node.path, {x: nx, y: ny}]});
+        }
+      }
+      frontier = next;
+    }
+  }
+  return candidates;
+}
+
+/**
  * Decompose a target rearrangement into an executable SEQUENCE of separate
  * drags (排珠, RearrangeSolver's companion).
  *
@@ -2704,14 +2770,14 @@ class RearrangeSolver {
  * bfsFindDonor returning null is therefore a real, expected outcome once
  * conversion is active (not "never happens" as in the no-convert case) —
  * handled by skipping that leaf's fix entirely (best-effort: it keeps
- * whatever value conversion left it with) rather than crashing. The
- * happens ONLY when conversion consumed the last copy of a value some
- * not-yet-fixed cell's target needed — since the first drag is a single,
- * fixed event (not repeated), this is a bounded, one-time risk from that
- * one drag, not a growing problem across the sequence. Left unmeasured
- * live: how often it actually triggers in practice (a live probe in this
- * project's own testing, with convertCount=Infinity across a wide first
- * drag, found zero misses — but that is one data point, not a guarantee).
+ * whatever value conversion left it with) rather than crashing.
+ *
+ * INTERNAL helper (P55) — not exported directly. `forcedFirstPath`, when
+ * given, is executed as drag #1 with conversion applied (used by the
+ * public `decomposeRearrangement` below to try several candidate first
+ * drags and keep whichever performs best); when null, ordinary leaf-
+ * pruning picks drag #1 naturally and conversion still applies to IT
+ * (mandatory in the real game — never skipped, just not specially aimed).
  *
  * @param {Board} originalBoard the board before any drags
  * @param {Board} targetBoard RearrangeSolver's chosen final arrangement
@@ -2722,15 +2788,15 @@ class RearrangeSolver {
  *   (left-behind) cells convert to; null = no conversion (default)
  * @param {number} convertCount how many of the first drag's touches
  *   convert (1-indexed by touch order); may be Infinity for the whole drag
+ * @param {Array<{x,y}>|null} forcedFirstPath optional candidate first-drag
+ *   path (destination -> ... -> donor order) to try in place of ordinary
+ *   leaf-pruning's own choice; null = no forcing
  * @returns {{drags: Array<{startX, startY, path: Array<{x,y}>, moves:
  *   string[]}>, board: Board}} `board` is the ACTUAL final board — equal to
  *   targetBoard when convertType is null, but DIFFERENT from it once
- *   conversion is active (the whole point of returning it): callers doing
- *   any post-decomposition demand check (--clear-all, --want-group, etc.)
- *   must use THIS board, never targetBoard, or they'd be checking against
- *   an arrangement that no longer exists after real conversion happened.
+ *   conversion is active.
  */
-function decomposeRearrangement(originalBoard, targetBoard, movableCells, convertType = null, convertCount = 0) {
+function decomposeRearrangementOnce(originalBoard, targetBoard, movableCells, convertType, convertCount, forcedFirstPath) {
   const board = originalBoard.clone();
   const drags = [];
   const w = originalBoard.width, h = originalBoard.height;
@@ -2742,6 +2808,10 @@ function decomposeRearrangement(originalBoard, targetBoard, movableCells, conver
   // Spanning tree(s) via BFS from an arbitrary root per connected component
   // (a component here can only be entered from within — grid-adjacency
   // restricted to movableSet — so BFS naturally stays inside one component).
+  // Built BEFORE any drags (including the P54 pre-pass below) so `pruned`/
+  // `degree` bookkeeping starts from one consistent structure and every
+  // "this cell is done" event — whether from the pre-pass or the main
+  // loop — goes through the SAME pruneCell() and stays correctly reflected.
   const treeAdj = new Map(movableCells.map(c => [cellKey(c.x, c.y), new Set()]));
   const seenForTree = new Set();
   for (const root of movableCells) {
@@ -2767,6 +2837,51 @@ function decomposeRearrangement(originalBoard, targetBoard, movableCells, conver
 
   const pruned = new Set();
   const degree = new Map([...treeAdj].map(([k, nbrs]) => [k, nbrs.size]));
+  const leaves = [];
+
+  // Mark a cell DONE: remove it from further consideration (never a donor,
+  // never an intermediate, never re-visited) and correctly propagate the
+  // removal to the spanning tree's degree bookkeeping — this is the exact
+  // step a bug (L59) omitted for the P54 pre-pass's cells, letting a LATER
+  // drag route straight through an already-fixed cell and destroy it. Both
+  // the pre-pass and the main loop below call this SAME function so the
+  // invariant ("not-yet-pruned cells' multiset === target's multiset over
+  // not-yet-pruned cells") is maintained identically regardless of WHICH
+  // mechanism fixed a given cell.
+  const pruneCell = key => {
+    pruned.add(key);
+    for (const nk of treeAdj.get(key)) {
+      if (pruned.has(nk)) continue;
+      degree.set(nk, degree.get(nk) - 1);
+      if (degree.get(nk) <= 1) leaves.push(nk);
+    }
+  };
+
+  // P55: if the caller (decomposeRearrangement's multi-candidate search)
+  // supplied a specific FIRST drag to try, execute it here with conversion
+  // applied, then pruneCell() every cell on its path (all of them end up
+  // EXACTLY matching their target: donor+intermediates become
+  // convertType, which is what their heuristic selection required; the
+  // destination receives the donor's original value, which is what it
+  // needed) — so none of them are revisited by the main loop below. If no
+  // forcedFirstPath is given (either convertType is null, or the caller
+  // is trying the "no forced choice" baseline candidate), this is a
+  // no-op and the main loop's own first drag applies conversion instead
+  // (see the `applyConvert` fallback below — conversion is mandatory in
+  // the real game, never skipped, just possibly less carefully aimed).
+  if (forcedFirstPath) {
+    const dragPath = [...forcedFirstPath].reverse(); // forcedFirstPath: L -> ... -> donor; reverse so index0 = donor
+    let cur = dragPath[0];
+    const moves = [];
+    for (let i = 1; i < dragPath.length; i++) {
+      const nxt = dragPath[i];
+      applyDragSwap(board, cur.x, cur.y, nxt.x, nxt.y, i, convertType, convertCount);
+      moves.push(dirName(nxt.x - cur.x, nxt.y - cur.y));
+      cur = nxt;
+    }
+    drags.push({startX: dragPath[0].x, startY: dragPath[0].y, path: dragPath, moves});
+    for (const p of dragPath) pruneCell(cellKey(p.x, p.y));
+  }
 
   const bfsFindDonor = (from, neededValue) => {
     const visited = new Set([cellKey(from.x, from.y)]);
@@ -2790,12 +2905,12 @@ function decomposeRearrangement(originalBoard, targetBoard, movableCells, conver
     }
     // Without conversion this is provably unreachable (invariant above);
     // WITH conversion (convertType !== null) it's a real, expected outcome
-    // once earlier drags have converted away the last supply of a value —
+    // once the pre-pass drag converted away the last supply of a value —
     // the caller treats null as "skip this leaf, best-effort".
     return null;
   };
 
-  let leaves = [...degree.entries()].filter(([, d]) => d <= 1).map(([k]) => k);
+  for (const [k, d] of degree) { if (d <= 1 && !pruned.has(k)) leaves.push(k); }
   while (leaves.length > 0) {
     const lk = leaves.pop();
     if (pruned.has(lk)) continue;
@@ -2807,13 +2922,16 @@ function decomposeRearrangement(originalBoard, targetBoard, movableCells, conver
         // path runs leaf -> ... -> donor; reverse so index0 = donor (drag
         // start) and the drag ends AT the leaf, delivering donor's value
         // there via the same swap-chain semantics used everywhere else.
-        const dragPath = [...path].reverse();
-        // --convert (see doc comment above): ONLY the first drag actually
-        // generated applies conversion, via the SAME applyDragSwap used by
-        // single-drag mode (touchIndex = path length BEFORE this move,
-        // 1-indexed) — the picked-up rune at dragPath[0] is never a swap
-        // destination, so it always still rides unconverted to the leaf.
+        // FALLBACK conversion: conversion is MANDATORY in the real game
+        // (not skippable) — if no forcedFirstPath was supplied or it
+        // didn't fully resolve here (drags.length still 0), this loop's
+        // own first constructed drag must still apply it, exactly like
+        // the original P51 behavior, accepting whatever disruption
+        // follows (P55's caller tries several forced candidates
+        // specifically to avoid landing here with a bad outcome, but this
+        // fallback always exists as the floor).
         const applyConvert = convertType !== null && drags.length === 0;
+        const dragPath = [...path].reverse();
         let cur = dragPath[0];
         const moves = [];
         for (let i = 1; i < dragPath.length; i++) {
@@ -2826,14 +2944,84 @@ function decomposeRearrangement(originalBoard, targetBoard, movableCells, conver
         drags.push({startX: dragPath[0].x, startY: dragPath[0].y, path: dragPath, moves});
       }
     }
-    pruned.add(lk);
-    for (const nk of treeAdj.get(lk)) {
-      if (pruned.has(nk)) continue;
-      degree.set(nk, degree.get(nk) - 1);
-      if (degree.get(nk) <= 1) leaves.push(nk);
-    }
+    pruneCell(lk);
   }
   return {drags, board};
+}
+
+/**
+ * Decompose a target rearrangement into an executable SEQUENCE of separate
+ * drags (排珠, RearrangeSolver's companion) — public entry point.
+ *
+ * --convert composition (P55, 2026-07-11, User-requested + User-steered:
+ * "why don't make it like, what is the best path of first-convert-N that
+ * will make the board fulfill {demand}... is it not possible? or too much
+ * combination?"): when convertType is active, an EARLIER version of this
+ * (P54) tried to derive a "provably safe" first drag in closed form — that
+ * had a genuine math error (see enumerateCandidateFirstDrags' doc: forcing
+ * a cell to convertType destroys its original value even at the drag's
+ * OWN destination, which the earlier proof missed) and made results WORSE
+ * on live testing (L59), not better. Direct search-and-verify, per the
+ * User's own suggestion, replaced it: try several PLAUSIBLE candidate
+ * first drags (`enumerateCandidateFirstDrags`, capped at `limit`) PLUS the
+ * "no forced choice" baseline (ordinary leaf-pruning picks drag #1
+ * naturally), run the COMPLETE decomposition for each, and keep whichever
+ * candidate leaves the FEWEST cells mismatched against the target board —
+ * a demand-agnostic proxy (this function doesn't know or care whether the
+ * caller wants --first-runes/--clear-all/anything else; fewer mismatches
+ * is strictly better for ANY of them) computed by direct comparison, not
+ * reasoned about abstractly. This is NOT exhaustive (bounded by `limit`
+ * candidates, each individually O(cells) to decompose — fast, ~30 cells
+ * max, so trying a dozen costs nothing noticeable) and is NOT guaranteed
+ * to find a zero-disruption drag if none exists among the candidates
+ * tried — but it can never do WORSE than the pre-P54 baseline (that
+ * baseline is always one of the candidates), and empirically recovers the
+ * full target whenever a workable first drag exists among the ones tried.
+ *
+ * @param {Board} originalBoard the board before any drags
+ * @param {Board} targetBoard RearrangeSolver's chosen final arrangement
+ * @param {Array<{x,y}>} movableCells cells eligible to participate
+ * @param {number|null} convertType rune type the first drag's touched
+ *   (left-behind) cells convert to; null = no conversion (default)
+ * @param {number} convertCount how many of the first drag's touches
+ *   convert (1-indexed by touch order); may be Infinity for the whole drag
+ * @returns {{drags: Array<{startX, startY, path: Array<{x,y}>, moves:
+ *   string[]}>, board: Board}} `board` is the ACTUAL final board — equal to
+ *   targetBoard when convertType is null, but DIFFERENT from it once
+ *   conversion is active. Callers doing any post-decomposition demand
+ *   check (--clear-all, --want-group, etc.) must use THIS board, never
+ *   targetBoard, or they'd be checking an arrangement that no longer
+ *   exists after real conversion happened (P48/P53).
+ */
+function decomposeRearrangement(originalBoard, targetBoard, movableCells, convertType = null, convertCount = 0) {
+  if (convertType === null || convertCount <= 0) {
+    return decomposeRearrangementOnce(originalBoard, targetBoard, movableCells, convertType, convertCount, null);
+  }
+  // limit = 12: each decomposeRearrangementOnce call is O(cells^2) worst
+  // case (leaf-pruning's own donor search, per leaf), so trying
+  // movableCells.length (up to 30) candidates costs O(cells^3) per
+  // decomposeRearrangement call — cheap for ONE call, but compounds badly
+  // across a test suite exercising this path repeatedly (measured live:
+  // raising this to movableCells.length blew verify.js's runtime from
+  // seconds to 4+ minutes with ZERO correctness benefit — P56's
+  // solveRearrangeConvertAware now supersedes this function as the
+  // GUARANTEED-correct path for anything that truly needs the exact
+  // target; this internal search stays a cheap best-effort fallback).
+  const candidatePaths = enumerateCandidateFirstDrags(originalBoard, targetBoard, movableCells, convertType, 12);
+  const attempts = [null, ...candidatePaths]; // null = "no forced first drag" baseline, always tried
+  let best = null, bestMismatches = Infinity;
+  for (const candidate of attempts) {
+    const attempt = decomposeRearrangementOnce(originalBoard, targetBoard, movableCells, convertType, convertCount, candidate);
+    let mismatches = 0;
+    for (let y = 0; y < targetBoard.height; y++) {
+      for (let x = 0; x < targetBoard.width; x++) {
+        if (attempt.board.get(x, y) !== targetBoard.get(x, y)) mismatches++;
+      }
+    }
+    if (mismatches < bestMismatches) { bestMismatches = mismatches; best = attempt; }
+    if (mismatches === 0) break; // perfect match — can't do better
+  }
+  return best;
 }
 
 /**
@@ -3170,6 +3358,196 @@ class RearrangeCoveragePlanner {
 }
 
 /**
+ * Generate candidate FIRST-DRAG conversion corridors for --rearrange +
+ * --convert (P56, 2026-07-11, User-requested: "guarantee perfection —
+ * teach the solver to build a target that already accounts for the forced
+ * conversion from the start", explicitly accepted as bigger than P52,
+ * correctness prioritized over speed for v1).
+ *
+ * Each candidate is a straight-line path [p0 (donor/start), p1, ..., pm
+ * (destination)] — DONOR-FIRST order (the natural order to generate one;
+ * note this is the OPPOSITE of decomposeRearrangementOnce's internal
+ * "destination->donor" BFS convention — reverse before use there).
+ * Diversity over exhaustiveness: for each potential start cell and each of
+ * 4 directions, tries several representative lengths (not every possible
+ * length), capped at `maxCandidates` total — each candidate requires a
+ * FULL fresh solve to evaluate (solveRearrangeConvertAware), so candidate
+ * COUNT directly drives wall time; this is the knob to tune once
+ * correctness is confirmed (User-confirmed: optimize speed after it works).
+ */
+function enumerateConversionCandidates(board, movableCells, maxCandidates = 24) {
+  const w = board.width, h = board.height;
+  const cellKey = (x, y) => y * w + x;
+  const movableSet = new Set(movableCells.map(c => cellKey(c.x, c.y)));
+  const candidates = [];
+  const LENGTHS = [1, 2, 3, 5, 8, 13, Infinity];
+  const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (const start of movableCells) {
+    for (const dir of DIRS) {
+      let maxLen = 0, cx = start.x, cy = start.y;
+      while (true) {
+        const nx = cx + dir[0], ny = cy + dir[1];
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h || !movableSet.has(cellKey(nx, ny))) break;
+        maxLen++; cx = nx; cy = ny;
+      }
+      if (maxLen === 0) continue;
+      const triedLens = new Set();
+      for (const L of LENGTHS) {
+        const len = L === Infinity ? maxLen : Math.min(L, maxLen);
+        if (len < 1 || triedLens.has(len)) continue;
+        triedLens.add(len);
+        const path = [{x: start.x, y: start.y}];
+        let px = start.x, py = start.y;
+        for (let i = 0; i < len; i++) { px += dir[0]; py += dir[1]; path.push({x: px, y: py}); }
+        candidates.push(path);
+        if (candidates.length >= maxCandidates) return candidates;
+      }
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Construct the board that results from applying a conversion candidate's
+ * FORCED FIRST DRAG (P56) — i.e. what the board looks like immediately
+ * after drag #1, before any further (unrestricted, freely re-plannable)
+ * drags. Matches applyDragSwap's real mechanics exactly: every cell in the
+ * path EXCEPT THE LAST becomes convertType — the drag's own donor/start
+ * cell IS forced too, a detail P54's original (flawed) proof missed, see
+ * L59 — and the LAST cell (destination) receives the donor's ORIGINAL
+ * value, carried through unconverted.
+ * @param {Array<{x,y}>} path donor-first order, as enumerateConversionCandidates returns
+ */
+function buildConvertedBoard(originalBoard, path, convertType) {
+  const board = originalBoard.clone();
+  const donorValue = originalBoard.get(path[0].x, path[0].y);
+  for (let i = 0; i < path.length - 1; i++) board.set(path[i].x, path[i].y, convertType);
+  board.set(path[path.length - 1].x, path[path.length - 1].y, donorValue);
+  return board;
+}
+
+/**
+ * Convert-AWARE joint solver for --rearrange + --convert (P56, 2026-07-11
+ * — supersedes P55's "choose target, then patch first-drag around it"
+ * approach, which exhaustive testing PROVED has a real ceiling: since a
+ * target chosen ignorant of conversion may structurally have no
+ * compatible first drag at all, no amount of first-drag cleverness can
+ * always recover it).
+ *
+ * Reframing (User-proposed direction, directly implemented): drags AFTER
+ * the first are completely unrestricted (P50's full-permutation
+ * guarantee) — so conversion isn't a disruption to route around, it's
+ * simply part of the STARTING POSITION for target selection. For each
+ * candidate first-drag corridor (enumerateConversionCandidates), build the
+ * board that results from applying it for real (buildConvertedBoard), and
+ * run a COMPLETELY FRESH solve (RearrangeSolver, escalating to
+ * RearrangeCoveragePlanner exactly like the ordinary no-convert path) for
+ * the requested demand STARTING FROM that post-conversion board. Whichever
+ * conversion candidate's fresh solve best satisfies the demand is kept.
+ *
+ * GUARANTEE: the kept result is EXACTLY realizable with zero further risk
+ * — the chosen first drag is executed for real (converting exactly what
+ * buildConvertedBoard simulated), and everything after it is a NORMAL,
+ * conversion-free decomposeRearrangement call, so the ORIGINAL P50 leaf-
+ * pruning proof applies without any of P54/P55's caveats (no later drag
+ * can ever be starved of a value that conversion consumed, because the
+ * "available supply" for phase 2 IS exactly the post-conversion board by
+ * construction, not an aspiration about it).
+ *
+ * COST (correctness-first per User's explicit direction — "if it works
+ * then we optimize speed from there"): runs a full solve (cheap
+ * RearrangeSolver pass, sometimes an expensive RearrangeCoveragePlanner
+ * escalation) for EVERY candidate tried (default up to 24), so wall time
+ * scales roughly linearly with candidate count. Early-exits the instant
+ * any candidate fully satisfies the demand — UNVERIFIED how often that
+ * happens early vs exhausts the whole candidate list live; this is
+ * exactly the profiling work the speed-optimization pass should start
+ * from.
+ *
+ * @param {Board} board the ORIGINAL board (before any drags)
+ * @param {object} options same shape RearrangeSolver/RearrangeCoveragePlanner
+ *   accept (sealedColumns, flags, twoMatch, clearTypes, minFirstRunes,
+ *   exactFirstRunes, etc.) PLUS `convertType`/`convertCount` (required —
+ *   this function assumes conversion IS active; callers should use the
+ *   ordinary RearrangeSolver+decomposeRearrangement path when it isn't)
+ *   and optional `conversionCandidates` (candidate count, default 24).
+ * @returns {{drags: Array<{startX,startY,path,moves}>, board: Board,
+ *   engine: string, movableCells: Array<{x,y}>}}
+ */
+function solveRearrangeConvertAware(board, options = {}) {
+  const movableCells = computeMovableComponents(board, options.flags ?? null).flat();
+  const convertType = options.convertType;
+  const convertCount = options.convertCount ?? Infinity;
+  const maxCandidates = options.conversionCandidates ?? 24;
+  const candidates = enumerateConversionCandidates(board, movableCells, maxCandidates);
+
+  const clearTotals = t => board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t || v === CURSE_BASE + t).length, 0);
+  const demandMissed = sim =>
+    ((options.minFirstCombos ?? 0) > 0 && (options.exactFirstCombos ? sim.firstCombos !== options.minFirstCombos : sim.firstCombos < options.minFirstCombos)) ||
+    ((options.minFirstAttrCombos ?? 0) > 0 && (options.exactFirstAttrCombos ? sim.firstAttrCombos !== options.minFirstAttrCombos : sim.firstAttrCombos < options.minFirstAttrCombos)) ||
+    ((options.minFirstRunes ?? 0) > 0 && (options.exactFirstRunes ? sim.firstRunes !== options.minFirstRunes : sim.firstRunes < options.minFirstRunes)) ||
+    (options.clearTypes ?? []).some(t => sim.firstClearedByType[t] < clearTotals(t)) ||
+    (options.firstWaveHaveTypes ?? []).some(t => sim.firstClearedByType[t] === 0);
+
+  let best = null, bestSim = null, bestPath = null, bestEngine = null;
+  for (const path of candidates) {
+    const convertedBoard = buildConvertedBoard(board, path, convertType);
+    const rsResult = new RearrangeSolver(convertedBoard, options).solve();
+    let candidateResult = rsResult, candidateEngine = 'RearrangeSolver';
+    let sim = BoardSimulator.resolve(rsResult.board.clone(), options);
+    if (demandMissed(sim)) {
+      const planned = new RearrangeCoveragePlanner(convertedBoard, options).solve();
+      if (planned.solution) {
+        const plannerSim = BoardSimulator.resolve(planned.solution.board.clone(), options);
+        if (!demandMissed(plannerSim) || plannerSim.firstRunes > sim.firstRunes) {
+          candidateResult = planned.solution; candidateEngine = 'RearrangeCoveragePlanner'; sim = plannerSim;
+        }
+      }
+    }
+    const stillMissed = demandMissed(sim);
+    const better = bestSim === null
+      || (!stillMissed && demandMissed(bestSim))
+      || (stillMissed === demandMissed(bestSim) && sim.firstRunes > bestSim.firstRunes);
+    if (better) { best = candidateResult; bestSim = sim; bestPath = path; bestEngine = candidateEngine; }
+    if (!stillMissed) break; // fully satisfied — stop searching
+  }
+
+  if (best === null) {
+    // No candidates generated (degenerate board) — fall back to the
+    // ordinary no-forced-conversion path.
+    const result = new RearrangeSolver(board, options).solve();
+    const decomposed = decomposeRearrangement(board, result.board, movableCells, convertType, convertCount);
+    return {drags: decomposed.drags, board: decomposed.board, engine: 'RearrangeSolver(no-candidates)', movableCells};
+  }
+
+  // Phase 1: the ACTUAL first drag, with real conversion applied — matches
+  // buildConvertedBoard's simulation exactly (same applyDragSwap mechanics).
+  const convertedBoard = buildConvertedBoard(board, bestPath, convertType);
+  let cur = bestPath[0];
+  const moves1 = [];
+  const dirName = (dx, dy) => dx === 1 ? 'right' : dx === -1 ? 'left' : dy === 1 ? 'down' : 'up';
+  const phase1Board = board.clone();
+  for (let i = 1; i < bestPath.length; i++) {
+    const nxt = bestPath[i];
+    applyDragSwap(phase1Board, cur.x, cur.y, nxt.x, nxt.y, i, convertType, convertCount);
+    moves1.push(dirName(nxt.x - cur.x, nxt.y - cur.y));
+    cur = nxt;
+  }
+  const phase1Drag = {startX: bestPath[0].x, startY: bestPath[0].y, path: bestPath, moves: moves1};
+
+  // Phase 2: realize `best.board` from convertedBoard with NO further
+  // conversion — guaranteed exact, per this function's doc comment.
+  const phase2 = decomposeRearrangement(convertedBoard, best.board, movableCells, null, 0);
+
+  return {
+    drags: [phase1Drag, ...phase2.drags],
+    board: phase2.board,
+    engine: `ConvertAware(${bestEngine},candidates=${candidates.length})`,
+    movableCells,
+  };
+}
+
+/**
  * Find the MAXIMUM achievable first-wave combo count on a board (P10):
  * upper-bound it from movable rune counts and resolvable-cell geometry, take
  * the DoraSolver result as the baseline, then let TargetPlanner construct
@@ -3244,5 +3622,5 @@ function solveMaxFirstCombos(board, options = {}) {
 
 // Export for use in content script
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap};
+  module.exports = {Board, MatchFinder, PathFinder, RuneSolver, ComboMaximizer, BeamSearchSolver, UnlimitedSolver, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, solveMaxFirstCombos, computeMaxFirstCombosBound, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE, applyDragSwap};
 }

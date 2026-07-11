@@ -17,16 +17,17 @@ Use these exact values unless the User approves a policy change:
 - A report contains at most ten summary bullets and no complete log or large code dump.
 - An implementation agent is never its own final acceptance agent.
 - Parallel writes are prohibited by default.
+- `TIER_A_CODEX_TARGET = gpt-5.6-sol` with `model_reasoning_effort = high` or a stronger available setting. Do not silently substitute another model.
 
 The retry key is `(bounded goal, failing acceptance check, observed symptom)`. A regression caused by the same patch chain does not reset the counter merely because its wording differs.
 
 ## 2. Capability tiers
 
-Tier names describe responsibility, not a permanently pinned model. Model examples are illustrative and must be checked against current availability before configuration.
+Tier names describe durable responsibilities. The Tier A Codex target below is binding until a User-approved model migration changes it; Tier B/C examples remain capability-based and must be checked against current availability.
 
 ### Tier A — Architect
 
-Typical configuration: GPT-5.6 Sol or a supported equivalent at High, Max, or the strongest justified reasoning level.
+Required Codex escalation target: `gpt-5.6-sol` at `high` or a stronger available reasoning setting. If that exact model is unavailable, stop before substituting another model, verify the installed model surface, and invoke the model-migration circuit breaker in section 8.
 
 Owns:
 
@@ -160,7 +161,7 @@ Apply this sequence literally.
 2. If a low/fast Tier C agent makes one tool, command, path, or syntax error, stop that agent's repair loop. Reassign to a stronger Tier C configuration or Tier B.
 3. Never run the identical failing command again without at least one material change.
 4. A retry is valid only when it adds new evidence, changes the hypothesis, uses a different tool, creates a smaller reproduction, or corrects an environment assumption.
-5. Tier C or Tier B may make at most two materially different repair attempts for the retry key. After the second failure, escalate to Tier A.
+5. Tier C or Tier B may make at most two materially different repair attempts for the retry key. After the second failure, escalate to Tier A using `TIER_A_CODEX_TARGET`; if the current session cannot select that target, stop and ask the User to start or authorize the required Tier A session.
 6. Tier A may make at most two materially different repair attempts for the retry key. If both fail, stop autonomous repair and use the User circuit breaker.
 7. Do not reset the counter because a retry introduced a different regression. Count the regression against the same patch chain until the original change is reverted or a new design is approved.
 8. Revert only session-owned changes when needed. Never discard or overwrite pre-existing User work.
@@ -239,6 +240,8 @@ When model availability changes:
 4. Run TOML validation and one representative dispatch.
 5. Preserve the old result and compare scope compliance, error rate, evidence quality, latency, and cost.
 6. Require User approval if dispatch authority, safety, review independence, or recursive depth would change.
+
+If `TIER_A_CODEX_TARGET` is unavailable when an escalation is required, use CB-08: present the verified available candidates and migration trade-offs, ask one narrow User question, and do not silently treat an equivalent model as the approved Tier A destination.
 
 ## 9. Protocol verification
 

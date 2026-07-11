@@ -244,7 +244,7 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
+const { Board, BoardSimulator, DoraSolver, TargetPlanner, RearrangeSolver, RearrangeCoveragePlanner, decomposeRearrangement, solveRearrangeConvertAware, CELL_FLAGS, FROZEN, SHIELD_BASE, CURSE_BASE } = require('../algorithm.js');
 const { solveDoraParallel, solveClearAllParallel, solveHaveParallel, solveMaxFirstCombosParallel, defaultWorkers } = require('./parallel.js');
 
 const COLS = [90, 270, 450, 630, 810, 990];
@@ -2191,7 +2191,7 @@ async function main() {
       // guard (`sol.moves.length === 0`) and start/end-pin check (skipped
       // entirely here since rearrangeMode already rejected --start/--end at
       // parse time) keep working completely unmodified.
-      const rs = new RearrangeSolver(board, {
+      const rearrangeOptions = {
         sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null,
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
         minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
@@ -2199,78 +2199,96 @@ async function main() {
         wantGroupType, wantGroupSize,
         twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
         rearrangeBeamWidth, rearrangeMaxSteps,
-      });
-      // Missed-demand check, mirroring the single-drag DoraSolver escalation
-      // trigger. MUST run against the REAL final board (post-decompose,
-      // post-conversion), not a candidate's aspirational target board — bug
-      // found live 2026-07-11 (L58): --convert forces some cells to a fixed
-      // type strictly AFTER a candidate is chosen, which can retroactively
-      // BREAK a plan that looked complete before conversion (e.g. a
-      // --first-runes 30 plan hitting exactly 30 pre-conversion, then
-      // dropping to 25 once wood:max overwrote cells that were carrying a
-      // DIFFERENT color's combo). Checking the pre-conversion board made the
-      // escalation trigger silently say "no need to try harder" even though
-      // the ACTUAL outcome missed — so decompose EVERY candidate (both the
-      // swap-beam result and, if needed, the coverage planner's) and check
-      // the true post-conversion board before deciding.
-      const rsClearTotals = t => board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t || v === CURSE_BASE + t).length, 0);
-      const demandMissed = sim =>
-        (minFirstArg > 0 && (exactMode ? sim.firstCombos !== minFirstArg : sim.firstCombos < minFirstArg)) ||
-        (minFirstAttr > 0 && (exactAttrMode ? sim.firstAttrCombos !== minFirstAttr : sim.firstAttrCombos < minFirstAttr)) ||
-        (minFirstRunes > 0 && (exactRunesMode ? sim.firstRunes !== minFirstRunes : sim.firstRunes < minFirstRunes)) ||
-        clearTypes.some(t => sim.firstClearedByType[t] < rsClearTotals(t)) ||
-        firstWaveHaveTypes.some(t => sim.firstClearedByType[t] === 0);
-      const realize = candidateResult => {
-        const decomposed = decomposeRearrangement(board, candidateResult.board, candidateResult.movableCells, convertType, convertCount);
-        const sim = BoardSimulator.resolve(decomposed.board.clone(), { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
-        return {decomposed, sim, missed: demandMissed(sim)};
       };
-
-      let result = rs.solve();
-      let real = realize(result);
-      let plannerEngine = null;
-      if (real.missed) {
-        const planner = new RearrangeCoveragePlanner(board, {
-          sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes,
-          clearTypes, firstWaveNoTypes, firstWaveHaveTypes, wantGroupType, wantGroupSize,
-          minFirstRunes, exactFirstRunes: exactRunesMode,
+      if (convertType !== null) {
+        // P56 (2026-07-11, User-requested: guarantee perfection — teach the
+        // solver to build a target that ALREADY accounts for the forced
+        // first-drag conversion, rather than choosing a target first and
+        // patching around conversion afterward (P54/P55, proven by
+        // exhaustive testing to have a real ceiling — the target itself may
+        // structurally have no compatible first drag, so no amount of
+        // first-drag cleverness recovers it). solveRearrangeConvertAware
+        // tries several candidate first-drag corridors and, for EACH,
+        // solves the demand completely FRESH starting from "the board as it
+        // would look right after that forced conversion" — so conversion
+        // becomes part of target selection, not a disruption to route
+        // around. GUARANTEED exactly realizable once found (see its doc
+        // comment) — but correctness-first, not yet speed-tuned (User-
+        // confirmed: optimize speed once it's confirmed working); each of
+        // up to `conversionCandidates` (default 24) tried candidates costs
+        // a full solve, so this can take several seconds to tens of
+        // seconds depending on the board/demand.
+        const conversionCandidates = Number(argValue('--rearrange-conversion-candidates') ?? 0) || undefined;
+        const convertResult = solveRearrangeConvertAware(board, {
+          ...rearrangeOptions, convertType, convertCount,
+          conversionCandidates,
           coverageMaxAttempts: Number(argValue('--rearrange-coverage-attempts') ?? 0) || undefined,
         });
-        const planned = planner.solve();
-        if (planned.solution) {
-          const plannerReal = realize(planned.solution);
-          // Keep the planner's candidate if it's a genuine improvement (no
-          // longer missing, OR covers more runes even if still short) —
-          // convertType can ALSO disrupt the planner's own tiling, so its
-          // result isn't automatically better; compare real outcomes, not
-          // aspirational ones.
-          if (!plannerReal.missed || plannerReal.sim.firstRunes > real.sim.firstRunes) {
-            result = planned.solution; real = plannerReal;
-            plannerEngine = `RearrangeCoveragePlanner(attempts=${planned.attempts})`;
+        rearrangeDrags = convertResult.drags;
+        const finalSim = BoardSimulator.resolve(convertResult.board.clone(), { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
+        sol = {
+          board: convertResult.board, score: finalSim.totalCombos * 4, comboCount: finalSim.totalCombos,
+          firstCombos: finalSim.firstCombos, firstAttrCombos: finalSim.firstAttrCombos,
+          firstRunes: finalSim.firstRunes, firstClearedByType: finalSim.firstClearedByType,
+          chains: finalSim.chains,
+          moves: rearrangeDrags.length > 0 ? ['rearranged'] : [],
+          path: [{x: rearrangeDrags[0]?.startX ?? 0, y: rearrangeDrags[0]?.startY ?? 0}],
+          startX: rearrangeDrags[0]?.startX ?? 0, startY: rearrangeDrags[0]?.startY ?? 0,
+        };
+        engine = convertResult.engine;
+      } else {
+        const rs = new RearrangeSolver(board, rearrangeOptions);
+        const result = rs.solve();
+        // Missed-demand check, mirroring the single-drag DoraSolver
+        // escalation trigger (L58): must run against the REAL final board
+        // (post-decompose), not an aspirational target.
+        const rsClearTotals = t => board.grid.reduce((n, row) => n + row.filter(v => v === t || v === SHIELD_BASE + t || v === CURSE_BASE + t).length, 0);
+        const demandMissed = sim =>
+          (minFirstArg > 0 && (exactMode ? sim.firstCombos !== minFirstArg : sim.firstCombos < minFirstArg)) ||
+          (minFirstAttr > 0 && (exactAttrMode ? sim.firstAttrCombos !== minFirstAttr : sim.firstAttrCombos < minFirstAttr)) ||
+          (minFirstRunes > 0 && (exactRunesMode ? sim.firstRunes !== minFirstRunes : sim.firstRunes < minFirstRunes)) ||
+          clearTypes.some(t => sim.firstClearedByType[t] < rsClearTotals(t)) ||
+          firstWaveHaveTypes.some(t => sim.firstClearedByType[t] === 0);
+        const realize = candidateResult => {
+          const decomposed = decomposeRearrangement(board, candidateResult.board, candidateResult.movableCells);
+          const sim = BoardSimulator.resolve(decomposed.board.clone(), { sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes: reserveTypes.length ? reserveTypes : null });
+          return {decomposed, sim, missed: demandMissed(sim)};
+        };
+        let real = realize(result);
+        let plannerEngine = null;
+        if (real.missed) {
+          const planner = new RearrangeCoveragePlanner(board, {
+            sealedColumns: sealedCols, flags: hasFlags ? flagGrid : null, twoMatch, noSolvableTypes, hazardPositions, reserveTypes,
+            clearTypes, firstWaveNoTypes, firstWaveHaveTypes, wantGroupType, wantGroupSize,
+            minFirstRunes, exactFirstRunes: exactRunesMode,
+            coverageMaxAttempts: Number(argValue('--rearrange-coverage-attempts') ?? 0) || undefined,
+          });
+          const planned = planner.solve();
+          if (planned.solution) {
+            const plannerReal = realize(planned.solution);
+            if (!plannerReal.missed || plannerReal.sim.firstRunes > real.sim.firstRunes) {
+              real = plannerReal;
+              plannerEngine = `RearrangeCoveragePlanner(attempts=${planned.attempts})`;
+            }
+            if (plannerReal.missed) {
+              console.log(`[TOS] PLANNER=${plannerEngine ? 'improved-but-still-short' : 'no-improvement'} constructed tiling still misses the demand (firstRunes=${plannerReal.sim.firstRunes})`);
+            }
+          } else {
+            console.log(`[TOS] PLANNER=failed reason=${planned.reason} (constructed 1 candidate tiling, ${planned.attempts} backtracking attempts total; NOT a proof of infeasibility — try --rearrange-coverage-attempts for a wider search)`);
           }
-          if (plannerReal.missed) {
-            console.log(`[TOS] PLANNER=${plannerEngine ? 'improved-but-still-short' : 'no-improvement'} constructed tiling still misses the demand after --convert is applied (firstRunes=${plannerReal.sim.firstRunes})`);
-          }
-        } else {
-          console.log(`[TOS] PLANNER=failed reason=${planned.reason} (constructed 1 candidate tiling, ${planned.attempts} backtracking attempts total; NOT a proof of infeasibility — try --rearrange-coverage-attempts for a wider search)`);
         }
+        rearrangeDrags = real.decomposed.drags;
+        sol = {
+          board: real.decomposed.board, score: real.sim.totalCombos * 4, comboCount: real.sim.totalCombos,
+          firstCombos: real.sim.firstCombos, firstAttrCombos: real.sim.firstAttrCombos,
+          firstRunes: real.sim.firstRunes, firstClearedByType: real.sim.firstClearedByType,
+          chains: real.sim.chains,
+          moves: rearrangeDrags.length > 0 ? ['rearranged'] : [],
+          path: [{x: rearrangeDrags[0]?.startX ?? 0, y: rearrangeDrags[0]?.startY ?? 0}],
+          startX: rearrangeDrags[0]?.startX ?? 0, startY: rearrangeDrags[0]?.startY ?? 0,
+        };
+        engine = plannerEngine ?? `RearrangeSolver(drags=${rearrangeDrags.length},movable=${result.movableCells.length})`;
       }
-      // decomposed/sim now reflect the ACTUAL final board (post-conversion)
-      // for whichever candidate was kept — every field below is recomputed
-      // from THAT board, not an aspirational target, so CLEAR_ALL/
-      // WANT_GROUP_RESULT/BOARD_AFTER downstream never silently check an
-      // arrangement that no longer exists post-execution.
-      rearrangeDrags = real.decomposed.drags;
-      sol = {
-        board: real.decomposed.board, score: real.sim.totalCombos * 4, comboCount: real.sim.totalCombos,
-        firstCombos: real.sim.firstCombos, firstAttrCombos: real.sim.firstAttrCombos,
-        firstRunes: real.sim.firstRunes, firstClearedByType: real.sim.firstClearedByType,
-        chains: real.sim.chains,
-        moves: rearrangeDrags.length > 0 ? ['rearranged'] : [],
-        path: [{x: rearrangeDrags[0]?.startX ?? 0, y: rearrangeDrags[0]?.startY ?? 0}],
-        startX: rearrangeDrags[0]?.startX ?? 0, startY: rearrangeDrags[0]?.startY ?? 0,
-      };
-      engine = plannerEngine ?? `RearrangeSolver(drags=${rearrangeDrags.length},movable=${result.movableCells.length})`;
     } else if (minFirstRunes > 0) {
       sol = await solveDoraParallel(board, {
         beamWidth: Number(argValue('--beam') ?? 200),

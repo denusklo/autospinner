@@ -104,9 +104,9 @@ Live browser/ADB behavior requires live evidence. If infrastructure is unavailab
 |---|---|
 | Diagnosis, dispatch, judgment, templates, knowledge, handoff, lesson routing | `COMPLETE` |
 | Root router, project config, agents, hooks, maintenance skill | `COMPLETE`; deterministic control tests pass |
-| Adversarial review report | `SKELETON` until fresh-context review |
-| Final verification report | `SKELETON` until Phase 8 |
-| Actual project config/hook loading in a new trusted session | `UNVERIFIED` |
+| Adversarial review report | `COMPLETE`; final independent findings Critical 0, High 0, Medium 0, Low 0 |
+| Final verification report | `COMPLETE`; `PASS WITH DOCUMENTED LIMITATIONS` |
+| Actual project config/hook loading in a new trusted session | `PARTIALLY VERIFIED`; static config accepted, live reload/trust pending |
 
 ## 8. Legacy coexistence
 

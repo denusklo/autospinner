@@ -39,7 +39,7 @@ ACCEPTANCE CRITERIA:
 VERIFICATION COMMANDS: {{read-only commands}}
 RETRY BUDGET: 2 materially different attempts per tier; low/fast Tier C escalates after one tool/path/syntax failure.
 EVIDENCE FORMAT: concise table of finding | evidence | confidence.
-OUTPUT FORMAT: Status; no more than 10 bullets; paths/lines; commands/exit codes; unresolved risks; next action.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: any write requirement; secret exposure risk; AP-01, AP-06, AP-07, AP-08, or repository-boundary mismatch.
 
 Do not dump complete files or logs into the parent context. Do not propose a fix unless explicitly asked.
@@ -72,7 +72,7 @@ VERIFICATION COMMANDS:
 
 RETRY BUDGET: 2 materially different attempts per tier; report current retry key and count.
 EVIDENCE FORMAT: requirement-to-result table plus concise diff summary.
-OUTPUT FORMAT: Status; <=10 bullets; files changed; commands/exit codes; results; risks; next action.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: acceptance ambiguity; patch budget exceeded; test/guard bypass; new dependency; AP-01 through AP-11 as applicable.
 
 Do not perform architecture changes. Do not paste full code or logs. Do not claim final acceptance; a fresh-context reviewer follows.
@@ -105,7 +105,7 @@ VERIFICATION COMMANDS:
 
 RETRY BUDGET: 2 materially different attempts per tier.
 EVIDENCE FORMAT: before/after behavior matrix, diff stat, and changed symbols.
-OUTPUT FORMAT: Status; <=10 bullets; files changed; commands/exit codes; results; risks; next action.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: behavior changes; fourth unrelated file; >200 changed application lines without approved budget; AP-01, AP-05, or AP-09.
 
 Do not dump full files or logs. Do not let the refactor become a feature.
@@ -134,7 +134,7 @@ ACCEPTANCE CRITERIA:
 VERIFICATION COMMANDS: {{exact independent commands}}
 RETRY BUDGET: 2 materially different diagnostic attempts per tier; no repair edits.
 EVIDENCE FORMAT: severity | evidence | impact | required correction.
-OUTPUT FORMAT: Status; <=10 summary bullets; finding table; commands/exit codes; verdict; risks.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: a write is required; evidence is unavailable; circuit breaker CB-03, CB-04, CB-08, or CB-10 applies.
 
 Do not modify files. Do not dump complete logs or code. Report findings before seeing the implementer's response.
@@ -163,7 +163,7 @@ ACCEPTANCE CRITERIA:
 VERIFICATION COMMANDS: {{exact commands}}
 RETRY BUDGET: 2 materially different diagnostic attempts per tier.
 EVIDENCE FORMAT: completion-row table plus severity-ranked findings.
-OUTPUT FORMAT: Status; reviewer identity; <=10 bullets; commands/exit codes; finding counts; verdict.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: missing objective; missing disk access; required external infrastructure unavailable.
 
 Do not modify files. A second pass in the implementer's context is not fresh-context acceptance.
@@ -197,7 +197,7 @@ ACCEPTANCE CRITERIA: {{what observation resolves the retry key}}
 VERIFICATION COMMANDS: {{new commands}}
 RETRY BUDGET: {{remaining attempts at this tier; maximum 2}}
 EVIDENCE FORMAT: hypothesis | experiment | result | disposition.
-OUTPUT FORMAT: Status; <=10 bullets; commands/exit codes; files changed; next action.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: tier budget exhausted; User circuit breaker; destructive or out-of-repo action.
 
 Do not repeat the same attempt under a different explanation. Do not dump complete logs.
@@ -226,7 +226,7 @@ ACCEPTANCE CRITERIA:
 VERIFICATION COMMANDS: {{aggregate and sample commands}}
 RETRY BUDGET: 2 materially different attempts per tier; one low/fast tool/path/syntax failure escalates.
 EVIDENCE FORMAT: count expected | count changed | samples | aggregate result.
-OUTPUT FORMAT: Status; <=10 bullets; exact files; commands/exit codes; exceptions; next action.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: any item does not match the proven pattern; shared file conflict; scope/line budget exceeded.
 
 Do not improvise a new pattern. Do not paste the transformed files or complete logs.
@@ -248,7 +248,7 @@ ACCEPTANCE CRITERIA: Cite the CLI branch, every artifact-writing call, ignore ru
 VERIFICATION COMMANDS: rg -n -- "--check|check.html|writeFile" phone/autospin.js; git -c safe.directory=C:/Projects/autospinner check-ignore -v phone/check.html
 RETRY BUDGET: 2 materially different attempts; escalate after one low-tier syntax/path error.
 EVIDENCE FORMAT: finding | path:line | confidence.
-OUTPUT FORMAT: Status plus <=10 bullets, commands/exits, risks, next action.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: any write or need for live device state.
 Do not dump files or logs. Do not propose recognition changes.
 ```
@@ -269,7 +269,7 @@ ACCEPTANCE CRITERIA: Valid 30-cell input parses; invalid input exits nonzero; su
 VERIFICATION COMMANDS: node --check phone/autospin.js; {{approved valid/invalid CLI fixture commands}}; node verify.js
 RETRY BUDGET: 2 materially different attempts per tier.
 EVIDENCE FORMAT: requirement | command | exit | result; concise diff stat.
-OUTPUT FORMAT: Status, <=10 bullets, files, commands/exits, limitations.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: parser ownership is ambiguous; ADB is invoked; fourth file needed; any test bypass.
 Do not make architecture changes or claim final acceptance.
 ```
@@ -290,7 +290,7 @@ ACCEPTANCE CRITERIA: Three sites use one helper; baseline and after output are b
 VERIFICATION COMMANDS: {{baseline fixture}}; node --check phone/autospin.js; {{same fixture and diff}}
 RETRY BUDGET: 2 materially different attempts per tier.
 EVIDENCE FORMAT: before hash | after hash | changed symbols | diff stat.
-OUTPUT FORMAT: Status, <=10 bullets, commands/exits, risk.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: output differs, a fourth format is semantically different, budget exceeded.
 Do not add features or dump the file/log.
 ```
@@ -311,7 +311,7 @@ ACCEPTANCE CRITERIA: TC-01..TC-10 evaluated; independent commands run; no Critic
 VERIFICATION COMMANDS: node --check algorithm.js; node --check verify.js; node verify.js; git -c safe.directory=C:/Projects/autospinner diff --check
 RETRY BUDGET: 2 diagnostic attempts per tier; no repair edits.
 EVIDENCE FORMAT: severity | evidence | impact | correction; completion-row table.
-OUTPUT FORMAT: Status, reviewer identity, <=10 bullets, commands/exits, finding counts, verdict.
+OUTPUT FORMAT: Exact section-1 headings: Status; Summary (1-10 bullets); Evidence; Commands (Command, integer Exit code, Result); Files changed; Unresolved risks; Recommended next action. Put task-specific findings, reviewer identity, verdicts, and limitations under Evidence or Unresolved risks.
 STOP CONDITIONS: required baseline missing, source overlap cannot be distinguished, external state required.
 Do not modify files or paste full diffs/logs.
 ```

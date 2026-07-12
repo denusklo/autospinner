@@ -51,6 +51,7 @@ function qualifies(sol, options, clearTypeTotals) {
   const last = sol.path[sol.path.length - 1];
   const endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
   if (endCells && !endCells.some(e => last.x === e.x && last.y === e.y)) return false;
+  if (options.avoidEndCells && options.avoidEndCells.some(e => last.x === e.x && last.y === e.y)) return false;
   const minC = options.minFirstCombos ?? 0, minR = options.minFirstRunes ?? 0;
   const minAC = options.minFirstAttrCombos ?? 0;
   if (minC > 0 && (options.exactFirstCombos ? sol.firstCombos !== minC : sol.firstCombos < minC)) return false;
@@ -607,6 +608,7 @@ async function solveMaxFirstCombosParallel(board, options = {}, workers = defaul
   const flags = opts.flags ?? null;
   const startCells = opts.startCells ?? null;
   const endCells = opts.endCells ?? (opts.endCell ? [opts.endCell] : null);
+  const avoidEndCells = opts.avoidEndCells ?? null;
   const fireRoute = opts.fireRoute ?? 0;
   const twoMatch = opts.twoMatch ?? null;
   const clearTypes = opts.clearTypes ?? [];
@@ -626,7 +628,7 @@ async function solveMaxFirstCombosParallel(board, options = {}, workers = defaul
   const dora = await solveDoraParallel(board, {
     beamWidth: opts.beamWidth ?? 200, maxPath: opts.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound, minFirstAttrCombos, exactFirstAttrCombos,
-    priorityCells: opts.priorityCells ?? [], startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount, wantGroupType, wantGroupSize,
+    priorityCells: opts.priorityCells ?? [], startCells, endCells, avoidEndCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount, wantGroupType, wantGroupSize,
   }, workers);
   let best = dora, achieved = dora.firstCombos;
 
@@ -635,7 +637,7 @@ async function solveMaxFirstCombosParallel(board, options = {}, workers = defaul
       sealedColumns, flags, minFirstCombos: n, minFirstAttrCombos, exactFirstAttrCombos, convertType, convertCount,
       beamWidth: opts.plannerBeamWidth ?? 300,
       maxPath: opts.plannerMaxPath ?? 60,
-      startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+      startCells, endCells, avoidEndCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
     };
     const res = clearTypes.length > 0
       ? await solveClearAllParallel(board, plannerOpts, workers)

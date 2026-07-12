@@ -1356,6 +1356,18 @@ class DoraSolver {
     // for backward compatibility.
     this.startCells = options.startCells ?? null;
     this.endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
+    // Forbidden END positions (2026-07-12, User-stated new "briar" board
+    // overlay): the held rune must NOT occupy any of these cells at the end
+    // of the returned path. Positional (stays with the CELL, not the rune —
+    // unlike shield/curse), and orthogonal to endCells: a cell may be both
+    // allowed by endCells and separately forbidden here (avoidEndCells wins,
+    // same as any other "forbidden" gate in this constructor). Touching or
+    // dragging THROUGH a briar cell is fine (User-confirmed) — this only
+    // restricts which states are ELIGIBLE as the final answer, exactly like
+    // endCells, just inverted. Packed x*10+y Set, same convention as
+    // hazardPositions.
+    this.avoidEndCells = options.avoidEndCells
+      ? new Set(options.avoidEndCells.map(p => p.x * 10 + p.y)) : null;
     // Fire-route trail length (see fireBlocked). 0 = off. When >0 the drag may
     // not re-enter any of the last `fireRoute` cells it left (self-avoiding
     // within a sliding window). Orthogonal to scoring; composes with everything.
@@ -1800,7 +1812,8 @@ class DoraSolver {
           // freely, so a path may pass through and come back). null = no
           // constraint. Multiple end cells are not weighted/preferred among
           // themselves — better() below picks the best-scoring one naturally.
-          const endOk = this.endCells === null || this.endCells.some(e => nx === e.x && ny === e.y);
+          const endOk = (this.endCells === null || this.endCells.some(e => nx === e.x && ny === e.y))
+            && (this.avoidEndCells === null || !this.avoidEndCells.has(nx * 10 + ny));
           // hazardOk/shieldOk/reserveOk/curseOk gate EVERY tier
           // unconditionally (P22/P30/P32/P37): a hazard, shield, reserve-
           // floor, or curse violation is forbidden, not merely undesirable,
@@ -1941,6 +1954,10 @@ class TargetPlanner {
     // is the primary engine for start/end. startCells alone routes fine.
     this.startCells = options.startCells ?? null;
     this.endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
+    // Forbidden END positions (see DoraSolver's constructor comment) —
+    // same "briar" mechanic, same packed-Set convention as hazardPositions.
+    this.avoidEndCells = options.avoidEndCells
+      ? new Set(options.avoidEndCells.map(p => p.x * 10 + p.y)) : null;
     this.fireRoute = options.fireRoute ?? 0; // see fireBlocked
     // Touch-conversion (see DoraSolver's constructor comment) — same
     // semantics, applied via the same applyDragSwap helper in routeToTarget.
@@ -2137,7 +2154,8 @@ class TargetPlanner {
     const scoreOf = s => s.completed * 20000 + s.matched * 1000 - s.potential - s.path.length * 0.5;
 
     const startSet = this.startCells ? new Set(this.startCells.map(c => c.x + ',' + c.y)) : null;
-    const atEnd = (x, y) => this.endCells === null || this.endCells.some(e => x === e.x && y === e.y);
+    const atEnd = (x, y) => (this.endCells === null || this.endCells.some(e => x === e.x && y === e.y))
+      && (this.avoidEndCells === null || !this.avoidEndCells.has(x * 10 + y));
     let beam = [];
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
@@ -3694,6 +3712,7 @@ function solveMaxFirstCombos(board, options = {}) {
   const flags = options.flags ?? null;
   const startCells = options.startCells ?? null;
   const endCells = options.endCells ?? (options.endCell ? [options.endCell] : null);
+  const avoidEndCells = options.avoidEndCells ?? null;
   const fireRoute = options.fireRoute ?? 0;
   const twoMatch = options.twoMatch ?? null;
   const clearTypes = options.clearTypes ?? [];
@@ -3713,7 +3732,7 @@ function solveMaxFirstCombos(board, options = {}) {
   const dora = new DoraSolver(board, {
     beamWidth: options.beamWidth ?? 200, maxPath: options.maxPath ?? 30,
     sealedColumns, flags, minFirstCombos: bound, minFirstAttrCombos, exactFirstAttrCombos,
-    priorityCells: options.priorityCells ?? [], startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount, wantGroupType, wantGroupSize,
+    priorityCells: options.priorityCells ?? [], startCells, endCells, avoidEndCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount, wantGroupType, wantGroupSize,
   }).solve();
   let best = dora, achieved = dora.firstCombos;
 
@@ -3722,7 +3741,7 @@ function solveMaxFirstCombos(board, options = {}) {
       sealedColumns, flags, minFirstCombos: n, minFirstAttrCombos, exactFirstAttrCombos,
       beamWidth: options.plannerBeamWidth ?? 300,
       maxPath: options.plannerMaxPath ?? 60,
-      startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount,
+      startCells, endCells, avoidEndCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions, convertType, convertCount,
     }).solve();
     if (res.solution) { best = res.solution; achieved = n; break; }
   }

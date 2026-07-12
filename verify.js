@@ -534,6 +534,33 @@ const sp11tp = new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstComb
 check('SP11 TargetPlanner honors multi-end (or correctly reports no route)',
   sp11tp.reason !== 'ok' || pinsRespected(sp11tp.solution, null, [{x: 1, y: 4}, {x: 5, y: 0}]), true);
 
+// SP12/SP13: avoidEndCells (2026-07-12, "briar" mechanic — forbidden final
+// END position; touching/dragging through and dissolving remain unrestricted,
+// so this ONLY filters which states are eligible as the final answer, exactly
+// like endCells but inverted).
+// SP12: the solver's own natural (unrestricted) best answer on BOARDS[1] ends
+// at (4,4) — confirm avoidEndCells=[(4,4)] forces a DIFFERENT end cell.
+const sp12Natural = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 12}).solve();
+const sp12NaturalEnd = sp12Natural.path[sp12Natural.path.length - 1];
+check('SP12 natural (unrestricted) end is (4,4), the cell this test avoids', [sp12NaturalEnd.x, sp12NaturalEnd.y], [4, 4]);
+const sp12 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 12, avoidEndCells: [{x: 4, y: 4}]}).solve();
+const sp12End = sp12.path[sp12.path.length - 1];
+check('SP12 avoidEndCells: solution never ends on the forbidden cell', sp12End.x === 4 && sp12End.y === 4, false);
+check('SP12 avoidEndCells: solution still moves (a real alternative exists)', sp12.moves.length > 0, true);
+
+// SP13: avoidEndCells composes with (and is filtered ON TOP OF) endCells —
+// listing a cell in BOTH endCells and avoidEndCells makes it ineligible;
+// the solver must fall through to the other listed end cell.
+const sp13 = new DoraSolver(mk(BOARDS[1]), {beamWidth: 200, maxPath: 12, endCells: [sp8EndA, sp8EndB], avoidEndCells: [sp8EndA]}).solve();
+const sp13End = sp13.path[sp13.path.length - 1];
+check('SP13 avoidEndCells overrides an otherwise-allowed endCells entry', [sp13End.x, sp13End.y], [sp8EndB.x, sp8EndB.y]);
+
+// SP14: composes with TargetPlanner the same way as endCells (SP11) — a
+// route whose only natural completion cell is avoided must be rejected.
+const sp14tp = new TargetPlanner(hardBoard, {sealedColumns: [0, 5], minFirstCombos: 5, avoidEndCells: [{x: 1, y: 4}]}).solve();
+check('SP14 TargetPlanner never completes on an avoided cell (or correctly reports no route)',
+  sp14tp.reason !== 'ok' || !(sp14tp.solution.path[sp14tp.solution.path.length - 1].x === 1 && sp14tp.solution.path[sp14tp.solution.path.length - 1].y === 4), true);
+
 // --- Clear-all-of-type via coverage planner (PROJECT-FACTS P14) ---
 // DoraSolver can't gather a scattered scarce type into its dissolving group(s);
 // TargetPlanner constructs coverage lines and routes them.

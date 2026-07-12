@@ -240,6 +240,27 @@
  *                                             # board-wide no-solvable prohibition-ring overlay
  *                                             # (any cell, `%` suffix; auto-detected but the ring
  *                                             # color can't be reliably read — default Wood).
+ *   node phone/autospin.js --cell 2,3=g --cell 4,0=w # declare a cell's TRUE rune type when a
+ *                                             # boss FAKE-turns it (surface shows one element,
+ *                                             # the rune really is another — fake runes render
+ *                                             # pixel-identical to real ones, so recognition
+ *                                             # can't tell; matching in the real game uses the
+ *                                             # TRUE type). Repeatable, any cell; markers
+ *                                             # (briar/shield/thorn/...) are preserved, only
+ *                                             # the element changes; the truth follows the rune
+ *                                             # through drags automatically in simulation.
+ *   node phone/autospin.js --briar-base 0,4=d # correct ONE briar cell's base element when the
+ *                                             # known briar+thorn ambiguous pairs (Dark/Heart,
+ *                                             # Fire/Light — see BRIAR_AMBIGUOUS warnings) pick
+ *                                             # wrong. Repeatable; errors on non-briar cells.
+ *   node phone/autospin.js --shield-cell 5,0  # manually mark a cell SHIELDED — fallback for
+ *                                             # when auto-detection misses (shield under the
+ *                                             # fire-hazard overlay IS auto-detected via the
+ *                                             # shield's pale bottom point, but that was
+ *                                             # calibrated from one example). Repeatable.
+ *   node phone/autospin.js --ignore-shield    # drop the shield floor entirely: shielded runes
+ *                                             # become normal runes of their element (all may
+ *                                             # dissolve; no ">=1 must survive" constraint).
  *   node phone/autospin.js --after-spin-kill  # ignores every other flag/solver: after recognizing
  *                                             # the board, moves ONE cell into any free neighbor,
  *                                             # holds (never sends the release), screenshots it
@@ -477,6 +498,23 @@ const SIGNATURES = [
   // original stage/lighting).
   { type: 0, thorn: true, rgb: [96, 121, 137] },   // Water + thorn (bright stage)
   { type: 5, thorn: true, rgb: [143, 116, 123] },  // Heart + thorn (bright stage)
+  // Bright-stage Dark+thorn and Fire+thorn (live 2026-07-12, User-confirmed
+  // at (0,0)/(0,4) and (5,1)): without their own points, bright plain
+  // Dark+thorn (132,89,134) matched Dark+SHIELD+thorn at dist 26 (false
+  // `+`), and bright plain Fire+thorn (129,92,83) matched the suspect
+  // "Frozen Fire + thorn, 2 rounds left" entry at 18.5 (false `#` — that
+  // entry's L37 suspicion note strikes again; left enabled per minimal
+  // change, but this is its second offense). With these points each plain
+  // read matches its own at ~0-1.
+  { type: 4, thorn: true, rgb: [132, 89, 134] },   // Dark + thorn (bright stage)
+  { type: 1, thorn: true, rgb: [129, 92, 83] },    // Fire + thorn (bright stage)
+  // Adding the Fire point above STOLE the same stage's Light+thorn cells
+  // ((5,3)/(5,4), previously matching the original Light+thorn point at
+  // 35.3 by luck; the Fire point sat 25.8) — caught by comparing the full
+  // board against the pre-change output (L38's re-check-the-siblings
+  // lesson). Each now matches its own point at ~0; Fire/Light bright-thorn
+  // sit 26.3 apart — comfortable.
+  { type: 3, thorn: true, rgb: [137, 116, 76] },   // Light + thorn (bright stage)
   // Bright plain Wood+thorn (live 2026-07-10, User-confirmed, L50): a plain
   // thorn-Wood cell measured (78,103,78) while its SIBLING on the same board
   // measured (64,113,65) (spot-on the original Wood* signature) — per-
@@ -495,6 +533,27 @@ const SIGNATURES = [
   // (dist 42.6/46.9) that the existing r-b family discriminator (scoped to
   // thorn cells only) isn't needed here; these are plain non-thorn shields.
   { type: 5, shield: true, rgb: [218, 140, 189] }, // Heart + shield
+  // Fire+shield (live 2026-07-12, User-confirmed at (3,0)/(4,1)/(3,3), all
+  // measuring an identical (221.7,162.2,141)): sat 53 from Heart+shield —
+  // inside MAX_SIG_DIST, so it silently misread as Heart until this entry
+  // existed (same gap as P56's missing Heart+shield). Shield coverage now:
+  // Wood/Dark/Heart/Fire (+thorn variants for Wood/Dark/Fire); Water/Light
+  // shield still unmeasured — unknown-guard refuses per L8.
+  { type: 1, shield: true, rgb: [221.7, 162.2, 141] }, // Fire + shield
+  // Fire+shield+thorn (live 2026-07-12, User-reported at (5,0)/(5,1)/(0,1),
+  // crops confirm white shield + orange flame under the thorn web): the
+  // plain Fire+shield point above sits ~97 away once thorn-darkened, so
+  // nearest-match fell through to Heart+thorn(bright) at dist 16-18 —
+  // silently wrong element, third time this exact shield+thorn gap has
+  // opened (Wood L47, Dark L47, now Fire). Point = mean of the two clean
+  // cells (137.0,115.7,108.0)/(136.3,115.1,107.7); the third cell carries a
+  // briar skull badge diluting green and still matches at ~9. Nearest
+  // competitor is Heart+thorn(bright) at 16.4 — modest margin, and r-b here
+  // (+29) overlaps the Heart family's range (+15.7..+27), so the thorn-cell
+  // family discriminator could NOT rescue this pair; the signature point is
+  // the only separator. Live Heart* cells keep their own points (16.6 vs
+  // 0.5 on this board's (5,3)).
+  { type: 1, thorn: true, shield: true, rgb: [136.7, 115.4, 107.9] }, // Fire + shield + thorn
 ];
 const MAX_SIG_DIST = 60;
 
@@ -536,6 +595,19 @@ const EDGE_HAZARD_SIGNATURES = [
   { type: 0, rgb: [169, 86, 67], chroma: chroma([169, 86, 67]) }, // Water (0,3), User-confirmed 2026-07-10 — see ambiguity note above
   { type: 4, rgb: [167, 88, 79], chroma: chroma([167, 88, 79]) }, // Dark (5,3), User-confirmed 2026-07-10
   { type: 5, rgb: [167, 86, 66], chroma: chroma([167, 86, 66]) }, // Heart (0,4), User-confirmed 2026-07-10
+  // ⚠️ This stage's Fire peek-through (2026-07-12, User-confirmed at (0,0))
+  // lands chroma-dist 0.028 from the Heart entry directly above — the
+  // documented Heart/Water ambiguity zone now includes Fire from a
+  // brighter-lit stage. Each true class still matches its own point at ~0;
+  // a sample landing BETWEEN them can guess wrong (accepted, same P22
+  // trade-off: better than blocking settling) — `--cell x,y=t` is the
+  // universal per-run correction when the eye disagrees.
+  { type: 1, rgb: [166, 88, 57], chroma: chroma([166, 88, 57]) }, // Fire (0,0), User-confirmed 2026-07-12 (bright stage)
+  // Bright-stage Light ((5,3)/(5,4), User-confirmed 2026-07-12): 0.025 from
+  // the bright-Fire point above — Fire/Light join the ambiguity cluster on
+  // this stage (each true class matches its own point at ~0; between =
+  // may guess wrong; --cell x,y=t corrects).
+  { type: 3, rgb: [177, 96, 53], chroma: chroma([177, 96, 53]) }, // Light (5,3)/(5,4), User-confirmed 2026-07-12 (bright stage)
 ];
 // Raised 0.035->0.08 (2026-07-10) to include the new calibration points
 // above (measured 0.044-0.073 from the nearest PRE-EXISTING signature) —
@@ -543,6 +615,100 @@ const EDGE_HAZARD_SIGNATURES = [
 // Light stayed 0.11+ away in the same measurement), so this doesn't create
 // new false-positive risk, it just accepts the Heart/Water ambiguity above.
 const MAX_EDGE_HAZARD_DIST = 0.08;
+
+// "Briar" overlay (new mechanic, live 2026-07-12, User-stated): a dark rose/
+// thorn-ring texture, POSITIONAL (stays with the CELL, confirmed by the
+// User — unlike shield/curse which travel with the rune). Behavior
+// (User-confirmed): touching/dragging THROUGH is fine, dissolving is fine —
+// the ONLY rule is the drag must never END on one of these cells. This is a
+// pure solver-eligibility filter (DoraSolver/TargetPlanner avoidEndCells,
+// the inverse of the existing endCells/--end mechanism), not a dissolve
+// constraint, so it needs no CELL_FLAGS/board-value trick at all — the
+// board keeps the cell's ordinary type.
+//
+// COMPLETE per-base palette (2026-07-12, reconciled across THREE live boards
+// + a direct User re-confirmation — see LESSONS L70): the briar tint maps
+// 1:1 to the base element and is rock-stable per cell (±3 units across 15
+// captures over ~10s, no animation). Earlier sessions each rebuilt this
+// table from ONE board's labels and threw away the previous board's
+// confirmations, which made every new board look like a contradiction; lining
+// up ALL confirmed labels across boards showed a single consistent palette
+// with exactly one conflicting label — re-asked, and the User confirmed it
+// was a slip ((4,4) is Water, not Light). The tint visibly tracks the base
+// hue (blue-ish Water, yellow-ish Light, green-ish Wood, pure-red Fire,
+// pink Heart, purple Dark).
+//
+// Thorn/sealed-column variants are darkened DIFFERENTLY (not a fixed
+// multiple) — each needs its own live-measured entry; Heart+thorn and
+// Wood+thorn measured so far, the other four refuse via the unknown-guard
+// until seen (L8). Briar detection itself stays structural (darkPct>0.45).
+const BRIAR_SIGNATURES = [
+  { type: 0, rgb: [51, 25, 34] },              // Water briar (boards A+C, User re-confirmed)
+  { type: 1, rgb: [71, 9, 7] },                // Fire briar (boards B+C)
+  { type: 2, rgb: [45, 29, 9] },               // Wood briar (boards A+C)
+  { type: 3, rgb: [67, 22, 6] },               // Light briar (boards B+C)
+  { type: 4, rgb: [66, 9, 33] },               // Dark briar (boards A+C)
+  // Second Dark cluster (board H (2,4), User-confirmed 2026-07-12): plain
+  // Dark briar showed per-instance brightness variance (L27 phenomenon) —
+  // (71,13,36) sat 6.8-7.1 from the point above and was correctly refused;
+  // nearest OTHER type from here is Heart at 9.9, so no silent cross-type
+  // flip, but runner-up warnings may fire for samples landing between.
+  { type: 4, rgb: [71, 13, 36] },              // Dark briar (bright instance)
+  { type: 5, rgb: [74, 18, 28] },              // Heart briar (boards A+B+C)
+  { type: 5, thorn: true, rgb: [60, 15, 20] }, // Heart briar + thorn (board B (0,4))
+  { type: 2, thorn: true, rgb: [49, 20, 13] }, // Wood briar + thorn (board C (0,4), User-confirmed)
+  // ⚠️ KNOWN AMBIGUOUS PAIR (2026-07-12, board D, User-confirmed, L71): Dark
+  // and Heart briar+thorn measure only ~4.8 apart (whole-cell) and ~4.5
+  // apart even at cell CORNERS — a genuine sensor limit (same class as
+  // P22's edge-hazard Heart/Water pair), NOT a threshold problem. Both
+  // entries stay so nearest-match picks the closer one; when the runner-up
+  // of a DIFFERENT type is within the same tolerance, a BRIAR_AMBIGUOUS
+  // warning is logged and --briar-base can correct the specific cell.
+  { type: 4, thorn: true, rgb: [56.3, 12.4, 21.5] }, // Dark briar + thorn (board D (0,4), User-confirmed)
+  // The thorn-variant cluster is CROWDED: Fire/Heart/Dark+thorn all sit
+  // within ~8.6-9.9 of each other (vs the plain palette's 13+ separation) —
+  // the BRIAR_AMBIGUOUS warning + --briar-base override are load-bearing
+  // for all three of these, not just the original Dark/Heart pair.
+  { type: 1, thorn: true, rgb: [59, 12, 12] },       // Fire briar + thorn (board E (0,4), User-confirmed 2026-07-12)
+  // ⚠️ only 7.7 from Dark+thorn (midpoint ~3.9, inside per-cell noise ±3) —
+  // BRIAR_AMBIGUOUS/--briar-base are the safety net.
+  { type: 0, thorn: true, rgb: [51, 18, 22] },       // Water briar + thorn (board F (0,4), User-confirmed 2026-07-12)
+  // ⚠️ only 5.5 from Fire+thorn — INSIDE the 6 tolerance (it silently
+  // misread as Fire before this entry existed, board G). With its own point
+  // each class matches at ~0 and the other appears as a <6 runner-up, so
+  // BRIAR_AMBIGUOUS fires on every Fire/Light thorn read — expected noise,
+  // trust the eye / --briar-base when they disagree. Thorn palette COMPLETE
+  // (all 6 bases measured).
+  { type: 3, thorn: true, rgb: [56.1, 16.6, 11.6] }, // Light briar + thorn (board G (0,4), User-confirmed 2026-07-12)
+];
+// Closest cross-type pair among PLAIN entries is Dark/Heart at 13.0
+// (Fire/Light at 13.6) — ambiguity midpoint 6.5, per-cell noise <=3-4, so 6
+// refuses at the midpoint while real same-type reads (dist <=4) pass. The
+// thorn-variant Dark/Heart pair sits INSIDE this tolerance (see above) —
+// handled by the ambiguity warning + override rather than the threshold.
+const MAX_BRIAR_DIST = 6;
+function classifyBriarBase(stats) {
+  let best = null, bestDist = Infinity, runnerType = null, runnerDist = Infinity;
+  for (const sig of BRIAR_SIGNATURES) {
+    const d = Math.hypot(stats.rgb[0] - sig.rgb[0], stats.rgb[1] - sig.rgb[1], stats.rgb[2] - sig.rgb[2]);
+    if (d < bestDist) { bestDist = d; best = sig; }
+  }
+  for (const sig of BRIAR_SIGNATURES) {
+    if (sig.type === best.type) continue; // runner-up must be a DIFFERENT element
+    const d = Math.hypot(stats.rgb[0] - sig.rgb[0], stats.rgb[1] - sig.rgb[1], stats.rgb[2] - sig.rgb[2]);
+    if (d < runnerDist) { runnerDist = d; runnerType = sig.type; }
+  }
+  return { type: best.type, thorn: best.thorn ?? false, dist: bestDist, runnerType, runnerDist };
+}
+// Detection: darkPct alone cleanly separates briar cells (measured live
+// 56-92%) from every other known state on the same board (plain cells
+// 4.7-10.2%, and this project's OTHER darkPct-gated overlays — thorn >0.20,
+// fire-hazard >0.20 — top out at ~0.39 in all prior live measurements this
+// session) — 0.45 sits with comfortable margin above every other overlay's
+// observed ceiling and below briar's own observed floor.
+function hasBriarOverlay(stats) {
+  return stats.darkPct > 0.45;
+}
 
 // --drag-from card-badge signatures (separate palette from board SIGNATURES
 // above — the UI icon's colors are brighter/more saturated than in-board
@@ -583,18 +749,18 @@ const TYPE_CSS = ['#44a0e0', '#e03020', '#30c040', '#d0a020', '#a040d0', '#e060a
 // in CHROMATICITY units (MAX_EDGE_HAZARD_DIST=0.035, vs the board's raw-RGB
 // MAX_SIG_DIST=60) — a flat MAX_SIG_DIST check would silently pass a truly
 // unknown edge-hazard base whose chromaticity distance is actually large.
-const cellUnknown = c => c.dist > (c.edgeNoClear ? MAX_EDGE_HAZARD_DIST : MAX_SIG_DIST);
+const cellUnknown = c => c.dist > (c.edgeNoClear ? MAX_EDGE_HAZARD_DIST : c.briar ? MAX_BRIAR_DIST : MAX_SIG_DIST);
 
 // Bug found live 2026-07-10: displaying an edge-hazard cell's chromaticity
 // distance (scale ~0.01-0.1) with .toFixed(0) always prints "d=0" — even for
 // a genuinely-failing distance like 0.08 — making a real classification
 // failure look like a confidently-suppressed dist=0. Use enough decimals for
 // the scale actually in play.
-const distStr = c => (c.edgeNoClear ? c.dist.toFixed(4) : c.dist.toFixed(0));
+const distStr = c => c.edgeNoClear ? c.dist.toFixed(4) : c.briar ? c.dist.toFixed(1) : c.dist.toFixed(0);
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const cellLabel = c => c.hurricane ? 'Hurricane'
-  : (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.iced ? '~' : '') + (c.frozen ? '#' : '') + (c.noSolvable ? '%' : '') + (c.edgeNoClear ? '$' : '') + (c.shield ? '+' : '') + (c.curse ? '&' : '')) + (c.thorn ? '*' : '') + (c.go ? '@' : '');
+  : (c.unknownBase ? 'Shock?' : TYPE_NAMES[c.type] + (c.electric ? '^' : '') + (c.iced ? '~' : '') + (c.frozen ? '#' : '') + (c.noSolvable ? '%' : '') + (c.edgeNoClear ? '$' : '') + (c.shield ? '+' : '') + (c.curse ? '&' : '') + (c.briar ? '!' : '')) + (c.thorn ? '*' : '') + (c.go ? '@' : '');
 
 // ---------- capture + recognition ----------
 
@@ -693,7 +859,7 @@ function detectHurricaneColumns(img) {
 function hurricaneCell(stats) {
   return {
     type: 0, thorn: false, electric: false, iced: false, frozen: false,
-    shield: false, noSolvable: false, edgeNoClear: false, curse: false, hurricane: true,
+    shield: false, noSolvable: false, edgeNoClear: false, curse: false, briar: false, hurricane: true,
     dist: 0, rgb: stats.rgb.map(Math.round), darkPct: stats.darkPct,
   };
 }
@@ -737,7 +903,17 @@ function noSolvableOverlayStats(img, cx, cy) {
 
 function hasNoSolvableOverlay(img, cx, cy) {
   const s = noSolvableOverlayStats(img, cx, cy);
-  return s.darkGreenPct > 0.18 && s.mutedPct > 0.08 && s.brownPct > 0.06;
+  // brownPct leg REMOVED (2026-07-12, live User report): this stage's rings
+  // render without the brown background pixels the original calibration had
+  // — 3 genuine ring cells measured brownPct 0.032-0.039 (failing the old
+  // >0.06 leg) while passing darkGreen 0.194-0.226 and muted 0.126-0.152.
+  // Safety was re-verified against every archived negative before dropping
+  // it: plain Wood (bright green, out of darkGreen's range) = 0.000,
+  // thorn-dimmed Wood (the likely original reason for the brown guard —
+  // its dimmed green lands inside darkGreen's per-pixel range but covers
+  // far too little area) = 0.000-0.018, fire-only hazard cells ~0.012,
+  // arbitrary other cells = 0.000 — a 10x margin below the 0.18 gate.
+  return s.darkGreenPct > 0.18 && s.mutedPct > 0.08;
 }
 
 /**
@@ -837,6 +1013,33 @@ function hasEdgeNoClearOverlay(img, cx, cy) {
   // own warm color satisfies firePct/yellowPct) measured darkPct 0.173 —
   // 0.20 keeps a comfortable margin on both sides.
   return s.firePct > 0.18 && s.yellowPct > 0.05 && s.darkPct > 0.20;
+}
+
+/**
+ * Shield detection UNDER the fire-hazard overlay (2026-07-12, P66 update):
+ * whole-cell and narrow-patch color/brightness metrics are useless here (a
+ * shielded and an unshielded hazard cell were indistinguishable in every
+ * whole-region probe), but the shield's pale BOTTOM POINT protrudes below
+ * where the two flame blobs end — region-restricted desaturation there
+ * separates cleanly: the one confirmed shielded hazard cell measured 0.382
+ * vs 0.000-0.075 across all 9 unshielded hazard cells on the same board
+ * (5x gap; threshold 0.20 leaves ~2.7x margin both ways). Calibrated from
+ * ONE positive example — if a future board shows a shielded hazard cell
+ * missing its `+`, or a false `+` on an unshielded one, re-measure before
+ * touching the threshold; `--shield-cell` remains the manual override.
+ */
+function hasShieldUnderHazard(img, cx, cy) {
+  let n = 0, pale = 0;
+  for (let dy = 55; dy <= 80; dy += 2) {
+    for (let dx = -35; dx <= 35; dx += 2) {
+      const i = img.off + ((cy + dy) * img.w + (cx + dx)) * 4;
+      const r = img.buf[i], g = img.buf[i + 1], b = img.buf[i + 2];
+      const mn = Math.min(r, g, b), mx = Math.max(r, g, b);
+      n++;
+      if (mx - mn < 45 && mx > 90) pale++;
+    }
+  }
+  return (pale / n) > 0.20;
 }
 
 function classifyEdgeHazardBase(img, cx, cy) {
@@ -1055,6 +1258,28 @@ function classifyBoardCell(img, gx, gy, noSolvableType, skipGlow = false, hurric
     const edge = classifyGoCoveredCell(cellCornerStats(img, cx, cy));
     if (edge.dist <= MAX_SIG_DIST) c = {...edge, go: true};
   }
+  // Briar overlay (2026-07-12): checked early, mirroring the no-solvable
+  // ring's priority — both are strong, whole-cell-dominating overlays that
+  // should override the base classify() result entirely rather than layer on
+  // top of it. darkPct>0.45 has not been observed to co-occur with any other
+  // known overlay's own darkPct range (all stay <=0.39), so no interaction
+  // guard against thorn/fire-hazard/no-solvable has been needed yet — revisit
+  // if a live board ever shows briar combined with another overlay.
+  if (!c.frozen && hasBriarOverlay(stats)) {
+    const briarBase = classifyBriarBase(stats);
+    c.type = briarBase.type;
+    c.dist = briarBase.dist;
+    c.thorn = briarBase.thorn;
+    c.briar = true;
+    // A different-element runner-up inside the same tolerance = the known
+    // Dark/Heart briar+thorn sensor limit (L71) — flag it so main() can log
+    // BRIAR_AMBIGUOUS and the User can correct with --briar-base if needed.
+    if (briarBase.runnerDist <= MAX_BRIAR_DIST) {
+      c.briarAmbiguous = { runnerType: briarBase.runnerType, dist: briarBase.dist, runnerDist: briarBase.runnerDist };
+    }
+    c.electric = false; c.iced = false; c.noSolvable = false; c.edgeNoClear = false; c.shield = false; c.curse = false;
+    return c;
+  }
   if (!c.frozen && hasNoSolvableOverlay(img, cx, cy)) {
     // The prohibition ring is a TRANSLUCENT TINT of the underlying gem's own
     // color (verified live 2026-07-10 via zoomed crop: green ring on a Wood
@@ -1112,6 +1337,10 @@ function classifyBoardCell(img, gx, gy, noSolvableType, skipGlow = false, hurric
       const edgeBase = classifyEdgeHazardBase(img, cx, cy);
       c.type = edgeBase.type; c.dist = edgeBase.dist; c.rgb = edgeBase.rgb;
     }
+    // Shield under the flame: whole-cell metrics can't see it, but the
+    // shield's pale bottom point protrudes below the flame blobs (see
+    // hasShieldUnderHazard). --shield-cell stays as the manual override.
+    if (hasShieldUnderHazard(img, cx, cy)) c.shield = true;
   }
   // Curse badge (2026-07-10, User-stated): a SMALL corner icon, unlike the
   // fire overlay it does NOT obscure the base rune at all — no reclassify
@@ -1209,6 +1438,15 @@ function readBoardFromScreen(quick = false) {
         }
       }
     }
+  }
+  if (process.argv.includes('--debug-briar')) {
+    const debug = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => {
+      if (c.briar || c.darkPct > 0.45) {
+        debug.push(`${gx},${gy}:${cellLabel(c)}:d=${distStr(c)}:rgb=${c.rgb.join('/')}:dark=${Math.round(c.darkPct * 100)}%`);
+      }
+    }));
+    console.log('[TOS] BRIAR_DEBUG=' + debug.join(' '));
   }
   return cells;
 }
@@ -1737,6 +1975,109 @@ async function main() {
       console.log(`[TOS] SHOCK_BASES_OVERRIDE=${elecCells.length} cell(s) set to [${bases.join(',')}]`);
     }
 
+    // sealedCols computed BEFORE display (moved 2026-07-12, LESSONS L68):
+    // inferSealedColumns only needs the >=3-per-column threshold from
+    // UNAFFECTED cells to reach the right answer even when another overlay
+    // (briar/fire-hazard) has wiped a few cells' own thorn flag — same
+    // ambiguity as L35 (fire+thorn), now recurring for briar+thorn. Once
+    // sealedCols is known (inferred OR forced via --sealed), it is COLUMN-
+    // INDEX ground truth — the solver's own sealedColumns enforcement
+    // already uses column membership, not the per-cell c.thorn flag, so
+    // decorating c.thorn=true for every cell in a sealed column is not a
+    // guess, it's restoring an already-true fact for DISPLAY that a cell's
+    // own darkening overlay had incidentally overwritten. This is a
+    // ONE-DIRECTION decoration (only ever sets thorn TRUE, never false) so
+    // it cannot introduce a NEW wrong inference — inferSealedColumns already
+    // ran using the pre-decoration values above.
+    const sealedArg = argValue('--sealed');
+    const sealedCols = sealedArg === 'none' ? []
+      : sealedArg ? sealedArg.split(',').map(Number)
+      : inferSealedColumns(cells);
+    console.log('[TOS] SEALED_COLS=' + JSON.stringify(sealedCols) + (sealedArg ? ' (forced)' : ' (inferred from thorn overlay)'));
+    if (sealedCols.length) {
+      cells.forEach(row => sealedCols.forEach(gx => { row[gx].thorn = true; }));
+    }
+
+    // --briar-base x,y=t (repeatable): correct one briar cell's base element
+    // when the known Dark/Heart briar+thorn ambiguity (L71) picks wrong —
+    // applied BEFORE the board display and board build so both see the
+    // corrected type.
+    for (let i = 0; i < process.argv.length; i++) {
+      if (process.argv[i] !== '--briar-base' && !process.argv[i].startsWith('--briar-base=')) continue;
+      const raw = process.argv[i].startsWith('--briar-base=') ? process.argv[i].slice(13) : process.argv[i + 1];
+      const m = /^(\d),(\d)=([a-z0-5])$/i.exec(raw ?? '');
+      if (!m) throw new Error(`--briar-base: expected col,row=type (e.g. 0,4=d), got "${raw}"`);
+      const bx = Number(m[1]), by = Number(m[2]);
+      const tok = m[3].toLowerCase();
+      const t = /^[0-5]$/.test(tok) ? Number(tok) : TYPE_LETTERS.indexOf(tok);
+      if (t === -1 || bx > 5 || by > 4) throw new Error(`--briar-base: bad cell/type in "${raw}"`);
+      if (!cells[by][bx].briar) throw new Error(`--briar-base: (${bx},${by}) is not a detected briar cell`);
+      console.log(`[TOS] BRIAR_BASE_OVERRIDE=(${bx},${by}) ${TYPE_NAMES[cells[by][bx].type]} -> ${TYPE_NAMES[t]}`);
+      cells[by][bx].type = t;
+      cells[by][bx].dist = 0;
+      delete cells[by][bx].briarAmbiguous;
+    }
+
+    // --cell x,y=t (repeatable): declare a cell's TRUE rune type when it
+    // differs from what's on screen — the "fake turn" boss mechanic
+    // (2026-07-12, User-stated): an enemy disguises some runes as another
+    // element (surface shows Water, the rune is really Wood); matching uses
+    // the TRUE type, so a fake-Water in a Water run breaks that run in the
+    // real game. The disguise is per-RUNE and rendered pixel-identically to
+    // a real rune of the surface type, so recognition CANNOT detect it —
+    // the User supplies the truth per cell, and since board values travel
+    // through swaps in simulation, the corrected type follows the rune
+    // wherever the drag moves it (no extra machinery needed). Works on any
+    // cell (unlike --briar-base, which validates briar-ness); markers
+    // (shield/curse/briar/etc.) are preserved — only the element changes.
+    for (let i = 0; i < process.argv.length; i++) {
+      if (process.argv[i] !== '--cell' && !process.argv[i].startsWith('--cell=')) continue;
+      const raw = process.argv[i].startsWith('--cell=') ? process.argv[i].slice(7) : process.argv[i + 1];
+      const m = /^(\d),(\d)=([a-z0-5])$/i.exec(raw ?? '');
+      if (!m) throw new Error(`--cell: expected col,row=type (e.g. 2,3=g), got "${raw}"`);
+      const bx = Number(m[1]), by = Number(m[2]);
+      const tok = m[3].toLowerCase();
+      const t = /^[0-5]$/.test(tok) ? Number(tok) : TYPE_LETTERS.indexOf(tok);
+      if (t === -1 || bx > 5 || by > 4) throw new Error(`--cell: bad cell/type in "${raw}"`);
+      if (cells[by][bx].frozen || cells[by][bx].hurricane) {
+        console.log(`[TOS] CELL_OVERRIDE_NOOP=(${bx},${by}) is frozen/hurricane — its element is irrelevant to the solver (never matches); override ignored`);
+        continue;
+      }
+      console.log(`[TOS] CELL_OVERRIDE=(${bx},${by}) ${TYPE_NAMES[cells[by][bx].type]} -> ${TYPE_NAMES[t]} (true type; on-screen appearance differs)`);
+      cells[by][bx].type = t;
+      cells[by][bx].dist = 0;
+    }
+
+    // --shield-cell x,y (repeatable): manually mark a cell SHIELDED when
+    // recognition can't see it — the shield watermark is fully covered by
+    // the fire-hazard overlay (measured 2026-07-12: a shielded and an
+    // unshielded hazard cell were indistinguishable in every probed metric),
+    // so shield-under-hazard is User-supplied.
+    for (let i = 0; i < process.argv.length; i++) {
+      if (process.argv[i] !== '--shield-cell' && !process.argv[i].startsWith('--shield-cell=')) continue;
+      const raw = process.argv[i].startsWith('--shield-cell=') ? process.argv[i].slice(14) : process.argv[i + 1];
+      const m = /^(\d),(\d)$/.exec(raw ?? '');
+      if (!m) throw new Error(`--shield-cell: expected col,row (e.g. 5,0), got "${raw}"`);
+      const bx = Number(m[1]), by = Number(m[2]);
+      if (bx > 5 || by > 4) throw new Error(`--shield-cell: bad cell in "${raw}"`);
+      console.log(`[TOS] SHIELD_CELL_OVERRIDE=(${bx},${by}) marked shielded (recognition can't see shield under an overlay)`);
+      cells[by][bx].shield = true;
+    }
+
+    // --ignore-shield (2026-07-12, User-requested): drop the shield floor
+    // constraint entirely — shielded runes become NORMAL runes of their base
+    // element (may all dissolve freely). Implemented by clearing the flag
+    // BEFORE any consumer runs: the board then encodes them as plain types
+    // (no SHIELD_BASE), so BoardSimulator's shieldTotal stays 0, the floor
+    // gate never fires, clear-all feasibility counts them as ordinary
+    // dissolvable runes, and the display drops the `+` marker (the
+    // SHIELD_IGNORED log records what was un-flagged).
+    if (process.argv.includes('--ignore-shield')) {
+      const dropped = [];
+      cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.shield) { c.shield = false; dropped.push(`${gx},${gy}`); } }));
+      if (dropped.length) console.log(`[TOS] SHIELD_IGNORED=${dropped.join(' ')} treated as normal runes (--ignore-shield: floor constraint OFF, all may dissolve)`);
+    }
+
     const unknowns = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => {
       if (cellUnknown(c)) unknowns.push(`(${gx},${gy})d=${distStr(c)}rgb=(${c.rgb})dark=${Math.round(c.darkPct * 100)}%`);
@@ -1809,6 +2150,21 @@ async function main() {
     const shieldCellsList = [];
     cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.shield) shieldCellsList.push(`${gx},${gy}`); }));
     if (shieldCellsList.length) console.log('[TOS] SHIELD_CELLS=' + shieldCellsList.join(' ') + ' (dissolves normally, travels with the rune; solver enforces >=1 shielded rune of each color must survive every wave — not a full freeze, P30)');
+    // Briar cells (2026-07-12, User-stated): POSITIONAL (stays with the cell,
+    // unlike shield/curse) — touching/dragging through and dissolving are
+    // both fine, the ONLY rule is the drag must not END on one of these
+    // cells. Pure eligibility filter, threaded as DoraSolver/TargetPlanner
+    // avoidEndCells (the inverse of the existing endCells/--end mechanism) —
+    // does not need hazardPositions/CELL_FLAGS/board-value machinery at all.
+    const avoidEndCellsDetected = [];
+    cells.forEach((row, gy) => row.forEach((c, gx) => { if (c.briar) avoidEndCellsDetected.push({ x: gx, y: gy }); }));
+    if (avoidEndCellsDetected.length) console.log('[TOS] BRIAR_CELLS=' + avoidEndCellsDetected.map(p => `${p.x},${p.y}`).join(' ') + ' (drag must not END here; touching/dragging through and dissolving are fine — enforced via solver avoidEndCells, unless --end overrides it below)');
+    // Surface the known Dark/Heart briar+thorn sensor limit (L71) instead of
+    // silently picking: distances this close mean the visual should be
+    // trusted over the classifier — correct with --briar-base if wrong.
+    cells.forEach((row, gy) => row.forEach((c, gx) => {
+      if (c.briarAmbiguous) console.log(`[TOS] BRIAR_AMBIGUOUS=${gx},${gy} chose ${TYPE_NAMES[c.type]} (d=${c.briarAmbiguous.dist.toFixed(1)}) over ${TYPE_NAMES[c.briarAmbiguous.runnerType]} (d=${c.briarAmbiguous.runnerDist.toFixed(1)}) — verify visually; override with --briar-base ${gx},${gy}=${TYPE_LETTERS[c.briarAmbiguous.runnerType]} if wrong`);
+    }));
     // {x,y} form for the drag-execution dwell logic below (User-reported live
     // 2026-07-10: a hazard cell's rune dissolved during an actual spin even
     // though the PLANNED path was verified safe — BoardSimulator never marks
@@ -1832,12 +2188,6 @@ async function main() {
       console.log('[TOS] NO_SOLVABLE_MARKERS=' + detectedNoSolvableTypes.map(t => TYPE_NAMES[t]).join(',')
         + ' (detected from board no-symbol overlay)');
     }
-
-    const sealedArg = argValue('--sealed');
-    const sealedCols = sealedArg === 'none' ? []
-      : sealedArg ? sealedArg.split(',').map(Number)
-      : inferSealedColumns(cells);
-    console.log('[TOS] SEALED_COLS=' + JSON.stringify(sealedCols) + (sealedArg ? ' (forced)' : ' (inferred from thorn overlay)'));
 
     if (checkOnly) {
       const out = path.join(__dirname, 'check.html');
@@ -1967,6 +2317,15 @@ async function main() {
     // must land on ANY ONE of them, and the solver picks whichever qualifying
     // one scores best (2026-07-10, User-requested).
     const endCells = argCells('--end');
+    // An explicit --end is a deliberate User override and wins over the
+    // auto-detected briar avoid-end list (User-requested 2026-07-12): if you
+    // specifically ask to end on a cell, forcing it takes priority even when
+    // that cell happens to be briar-marked — avoidEndCells only applies when
+    // the User hasn't pinned an explicit end themselves.
+    const avoidEndCells = endCells ? [] : avoidEndCellsDetected;
+    if (endCells && avoidEndCellsDetected.length > 0) {
+      console.log('[TOS] BRIAR_END_OVERRIDE=--end given, so briar avoid-end is not enforced this solve (User\'s explicit --end wins)');
+    }
     if (dragFromCol === null && startCell === null && goCells.length > 0) {
       startCell = goCells[0];
       if (goCells.length > 1) console.log('[TOS] GO_START=multiple detected; using first row-major ' + `${startCell.x},${startCell.y}`);
@@ -2101,6 +2460,14 @@ async function main() {
         console.log(`[TOS] ABORT=rearrange-conflict ${incompatible.join(',')} has no meaning in --rearrange mode (multiple separate drags, no single path/start/end) (no touch sent)`);
         return;
       }
+      // avoidEndCells (briar, auto-detected from the board, not a CLI flag
+      // the User chose) is NOT added to the incompatible-abort list above —
+      // unlike --start/--end/--fire-route/--drag-from, the User can't simply
+      // "not pass" a board condition. Same reasoning: --rearrange has no
+      // single final drag position (multiple independent swaps), so briar's
+      // constraint has no equivalent here — silently inapplicable rather than
+      // blocking the whole rearrange.
+      if (avoidEndCells.length > 0) console.log('[TOS] BRIAR_IGNORED=--rearrange has no single final drag position; briar avoid-end has no effect here');
       // --convert composes with --rearrange (2026-07-10, User-requested +
       // User-confirmed design): ONLY the FIRST physical drag actually
       // generated converts its touched cells — a multi-drag rearrangement
@@ -2421,7 +2788,7 @@ async function main() {
         minFirstRunes, exactFirstRunes: exactRunesMode,
         minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
         convertType, convertCount, wantGroupType, wantGroupSize,
-        startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+        startCells, endCells, avoidEndCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       engine = `DoraSolver(firstRunes${exactRunesMode ? '==' : '>='}${minFirstRunes})`;
     } else if (maxMode) {
@@ -2439,7 +2806,7 @@ async function main() {
         plannerMaxPath: Math.max(60, Number(argValue('--max-path') ?? 0)),
         minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
         convertType, convertCount, wantGroupType, wantGroupSize,
-        startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+        startCells, endCells, avoidEndCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       sol = res.solution;
       engine = `MaxFirstCombos(achieved=${res.achieved}/bound=${res.bound})`;
@@ -2452,7 +2819,7 @@ async function main() {
         minFirstCombos: minFirstArg, exactFirstCombos: exactMode,
         minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
         convertType, convertCount, wantGroupType, wantGroupSize,
-        startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+        startCells, endCells, avoidEndCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       }, workers);
       engine = 'DoraSolver';
     }
@@ -2509,7 +2876,7 @@ async function main() {
         minFirstAttrCombos: minFirstAttr, exactFirstAttrCombos: exactAttrMode,
         convertType, convertCount, wantGroupType, wantGroupSize,
         beamWidth: plannerBeam, maxPath: plannerMaxPath,
-        startCells, endCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
+        startCells, endCells, avoidEndCells, fireRoute, twoMatch, clearTypes, firstWaveNoTypes, firstWaveHaveTypes, reserveTypes, noSolvableTypes, hazardPositions,
       };
       // Clear-all and first-wave-have coverage targets are independent
       // routing problems — shard them across the same worker pool; the
@@ -2610,7 +2977,7 @@ async function main() {
     // rare — for EVERY reachable arrangement within --max-path to violate it,
     // leaving no valid answer at all (DoraSolver returns the degenerate
     // moves=0 solution). Abort rather than send a no-op/undefined drag.
-    if (sol.moves.length === 0 && !startCell && !endCells) {
+    if (sol.moves.length === 0 && !startCell && !endCells && avoidEndCells.length === 0) {
       if (rearrangeMode) {
         console.log('[TOS] ABORT=no-rearrangement-found — the current arrangement is already the best RearrangeSolver could reach (or nothing to move); try a wider --rearrange-beam/--rearrange-steps (no touch sent)');
       } else {
@@ -2626,13 +2993,20 @@ async function main() {
     // Start/end pinning is a hard constraint: if the solver couldn't honor it
     // (end unreachable within --max-path, or nothing to seed), abort rather
     // than spin a path that ignores the pins. Checked before the first-wave
-    // aborts so an impossible pin is reported as the root cause.
-    if (startCell || endCells) {
+    // aborts so an impossible pin is reported as the root cause. avoidEndCells
+    // (briar, 2026-07-12) is checked the same way — a defense-in-depth
+    // re-verification of what the solver's own avoidEndCells gate already
+    // guarantees, same pattern as every other WARNING self-check in this file.
+    if (startCell || endCells || avoidEndCells.length > 0) {
       const first = sol.path[0], last = sol.path[sol.path.length - 1];
       const startOk = !startCell || (first.x === startCell.x && first.y === startCell.y);
       const endOk = !endCells || endCells.some(e => last.x === e.x && last.y === e.y);
-      if (sol.moves.length === 0 || !startOk || !endOk) {
-        console.log(`[TOS] ABORT=start-end required start=${startCell ? `${startCell.x},${startCell.y}` : 'any'} end=${endCells ? endCells.map(e => `${e.x},${e.y}`).join('|') : 'any'} but got start=${first.x},${first.y} end=${last.x},${last.y} moves=${sol.moves.length} — unreachable within --max-path ${Number(argValue('--max-path') ?? 30)} (raise --max-path, or relax --start/--end); no touch sent`);
+      const avoidOk = !avoidEndCells.some(p => last.x === p.x && last.y === p.y);
+      if (sol.moves.length === 0 || !startOk || !endOk || !avoidOk) {
+        if (!avoidOk) {
+          console.log(`[TOS] WARNING=solver returned a path ending on an avoided briar cell (${last.x},${last.y}) — this should be impossible; please report with this board+path`);
+        }
+        console.log(`[TOS] ABORT=start-end required start=${startCell ? `${startCell.x},${startCell.y}` : 'any'} end=${endCells ? endCells.map(e => `${e.x},${e.y}`).join('|') : 'any'}${avoidEndCells.length > 0 ? ` avoid:${avoidEndCells.map(p => `${p.x},${p.y}`).join('|')}` : ''} but got start=${first.x},${first.y} end=${last.x},${last.y} moves=${sol.moves.length} — unreachable within --max-path ${Number(argValue('--max-path') ?? 30)} (raise --max-path, or relax --start/--end); no touch sent`);
         return;
       }
     }

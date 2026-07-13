@@ -148,7 +148,7 @@ Give `fresh-context-reviewer`:
 1. Instruction hierarchy and root override.
 2. Repository boundary and cross-shell path behavior.
 3. Retry count, circuit breakers, completion evidence, and independent identity.
-4. JSON/TOML/agent/skill fields and model-pin absence.
+4. JSON/TOML/agent/skill fields, approved model/reasoning pin accuracy, and inheritance only where the active routing policy permits it.
 5. Hook allowed/blocked behavior and bypass policy.
 6. Links, IDs, file budgets, placeholders, and circular references.
 7. Source/global/out-of-repository change detection.

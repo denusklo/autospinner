@@ -13,8 +13,9 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const EXPECTED_ROOT = path.win32.normalize('C:\\Projects\\autospinner').toLowerCase();
 const REQUIRED = [
   'AGENTS.md', '.codex/config.toml', '.codex/hooks.json',
-  '.codex/agents/harness-explorer.toml', '.codex/agents/harness-worker.toml',
-  '.codex/agents/fresh-context-reviewer.toml', '.codex/hooks/README.md',
+  '.codex/agents/coding-worker.toml', '.codex/agents/harness-explorer.toml',
+  '.codex/agents/harness-worker.toml', '.codex/agents/fresh-context-reviewer.toml',
+  '.codex/hooks/README.md',
   '.codex/hooks/pre-tool-use-guard.js', '.codex/hooks/completion-evidence-guard.js',
   '.codex/hooks/test-hooks.js', '.codex/hooks/validate-harness.js',
   '.agents/skills/harness-maintenance/SKILL.md',
@@ -174,6 +175,8 @@ function runValidation() {
 
   try {
     const config = parseTomlSubset(read('.codex/config.toml'), '.codex/config.toml');
+    check(config.get('model') === 'gpt-5.6-sol', 'Commander/planning model must be gpt-5.6-sol');
+    check(config.get('model_reasoning_effort') === 'max', 'Commander/planning reasoning effort must be max');
     check(config.get('sandbox_mode') === 'workspace-write', 'sandbox_mode must be workspace-write');
     check(config.get('approval_policy') === 'on-request', 'approval_policy must be on-request');
     check(config.get('sandbox_workspace_write.network_access') === false, 'network_access must be false');
@@ -185,20 +188,30 @@ function runValidation() {
     check(![...config.keys()].some(key => key.startsWith('mcp_servers.')), 'project config adds an unreviewed MCP server');
   } catch (error) { errors.push(error.message); }
 
-  const agents = { 'harness-explorer': 'read-only', 'harness-worker': 'workspace-write', 'fresh-context-reviewer': 'read-only' };
-  for (const [name, sandbox] of Object.entries(agents)) {
+  const agents = {
+    'coding-worker': { sandbox: 'workspace-write', model: 'gpt-5.6-sol', effort: 'high' },
+    'harness-explorer': { sandbox: 'read-only', model: 'gpt-5.6-terra', effort: 'high' },
+    'harness-worker': { sandbox: 'workspace-write', model: 'gpt-5.6-luna', effort: 'medium' },
+    'fresh-context-reviewer': { sandbox: 'read-only', model: 'gpt-5.6-sol', effort: 'max' }
+  };
+  for (const [name, expected] of Object.entries(agents)) {
     const relative = `.codex/agents/${name}.toml`;
     try {
       const agent = parseTomlSubset(read(relative), relative);
       check(agent.get('name') === name, `${relative}: name mismatch`);
       check((agent.get('description') || '').length >= 30, `${relative}: description too vague`);
       check((agent.get('developer_instructions') || '').length >= 300, `${relative}: instructions incomplete`);
-      check(agent.get('sandbox_mode') === sandbox, `${relative}: sandbox must be ${sandbox}`);
-      check(!agent.has('model'), `${relative}: concrete model pin is forbidden`);
+      check(agent.get('sandbox_mode') === expected.sandbox, `${relative}: sandbox must be ${expected.sandbox}`);
+      check(agent.get('model') === expected.model, `${relative}: model must be ${expected.model}`);
+      check(agent.get('model_reasoning_effort') === expected.effort, `${relative}: reasoning effort must be ${expected.effort}`);
       check(/Do not spawn subagents/i.test(agent.get('developer_instructions') || ''), `${relative}: recursion prohibition missing`);
       check(/ten summary bullets|No more than ten summary bullets/i.test(agent.get('developer_instructions') || ''), `${relative}: report cap missing`);
     } catch (error) { errors.push(error.message); }
   }
+
+  const diagnosis = read('docs/codex-harness/01-HARNESS-LEAK-DIAGNOSIS.md');
+  check(/Deploy four narrow project agents/i.test(diagnosis) && /application coding worker/i.test(diagnosis), 'diagnosis must describe all four project agents');
+  check(/Confirm four agent files contain the approved model\/effort routes/i.test(diagnosis), 'diagnosis agent verification count or route check drift');
 
   try {
     const hooks = JSON.parse(read('.codex/hooks.json'));

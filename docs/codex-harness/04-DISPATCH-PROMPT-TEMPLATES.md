@@ -16,11 +16,12 @@
 - Under `Commands`, require `Command`, integer `Exit code`, and `Result`; state `none` explicitly where permitted.
 - Forbid complete logs, large code dumps, secrets, unsupported completion claims, and recursive delegation.
 - A report is not independent acceptance unless it comes from the distinct read-only `fresh-context-reviewer` role.
+- Use only the approved role routes: Commander/planning/review Sol `max`, coding Sol `high`, exploration/search Terra `high`, and small mechanical Luna `medium`.
 
 ## 2. Template — Research and repository search
 
 ```text
-ROLE: harness-explorer or another explicitly read-only explorer
+ROLE: harness-explorer (gpt-5.6-terra, high; read-only)
 
 PARENT OBJECTIVE: {{parent objective}}
 CONTEXT: {{why this search matters and how the result will be used}}
@@ -48,7 +49,7 @@ Do not dump complete files or logs into the parent context. Do not propose a fix
 ## 3. Template — Feature implementation
 
 ```text
-ROLE: named application worker or Commander; never harness-worker
+ROLE: coding-worker (gpt-5.6-sol, high); never harness-worker
 
 PARENT OBJECTIVE: {{parent objective}}
 CONTEXT: {{approved user-visible behavior and why it matters}}
@@ -81,7 +82,7 @@ Do not perform architecture changes. Do not paste full code or logs. Do not clai
 ## 4. Template — Code refactoring
 
 ```text
-ROLE: named application refactoring worker or Commander; never harness-worker
+ROLE: coding-worker (gpt-5.6-sol, high); never harness-worker
 
 PARENT OBJECTIVE: {{parent objective}}
 CONTEXT: {{why the refactor is needed and behavior that must not change}}
@@ -114,7 +115,7 @@ Do not dump full files or logs. Do not let the refactor become a feature.
 ## 5. Template — Code review
 
 ```text
-ROLE: fresh-context-reviewer or named read-only specialist
+ROLE: fresh-context-reviewer (gpt-5.6-sol, max; read-only)
 
 PARENT OBJECTIVE: {{what change is being reviewed}}
 CONTEXT: {{acceptance criteria and risk level; exclude implementer rationale}}
@@ -143,7 +144,7 @@ Do not modify files. Do not dump complete logs or code. Report findings before s
 ## 6. Template — Fresh-context acceptance
 
 ```text
-ROLE: fresh-context-reviewer (mandatory, read-only)
+ROLE: fresh-context-reviewer (gpt-5.6-sol, max; mandatory, read-only)
 
 PARENT OBJECTIVE: {{approved task}}
 CONTEXT: Judge only disk state, objective, and acceptance criteria. Do not trust the parent summary.
@@ -206,7 +207,7 @@ Do not repeat the same attempt under a different explanation. Do not dump comple
 ## 8. Template — Mechanical batch application after a proven pattern
 
 ```text
-ROLE: Tier C harness-worker or named mechanical worker
+ROLE: harness-worker (gpt-5.6-luna, medium) or another explicitly approved small-mechanical role
 
 PARENT OBJECTIVE: {{batch objective}}
 CONTEXT: Tier A/B proved pattern {{pattern}} on {{proof sample and evidence}}.
@@ -235,7 +236,7 @@ Do not improvise a new pattern. Do not paste the transformed files or complete l
 ## 9. Worked example — Research/search
 
 ```text
-ROLE: harness-explorer
+ROLE: harness-explorer (gpt-5.6-terra, high)
 PARENT OBJECTIVE: Document the real artifact path for phone recognition checks.
 CONTEXT: Future workers must know which command creates which ignored evidence before changing recognition.
 IN-SCOPE PATHS: phone/autospin.js, .gitignore, CLAUDE.md, .claude/harness/06-RECOGNITION-PROTOCOL.md
@@ -256,7 +257,7 @@ Do not dump files or logs. Do not propose recognition changes.
 ## 10. Worked example — Feature implementation
 
 ```text
-ROLE: named application worker (not harness-worker)
+ROLE: coding-worker (gpt-5.6-sol, high; not harness-worker)
 PARENT OBJECTIVE: Add an already-approved deterministic --board input path to the phone dry-run CLI.
 CONTEXT: Acceptance needs a device-independent fixture path; input syntax and behavior were approved by the Commander/User.
 IN-SCOPE PATHS: phone/autospin.js, verify.js, README.md
@@ -277,7 +278,7 @@ Do not make architecture changes or claim final acceptance.
 ## 11. Worked example — Refactoring
 
 ```text
-ROLE: named application worker
+ROLE: coding-worker (gpt-5.6-sol, high)
 PARENT OBJECTIVE: Extract a proven repeated [TOS] marker formatter without changing output.
 CONTEXT: Three call sites use the same already-reviewed format; byte-for-byte log compatibility is mandatory.
 IN-SCOPE PATHS: phone/autospin.js
@@ -298,7 +299,7 @@ Do not add features or dump the file/log.
 ## 12. Worked example — Review
 
 ```text
-ROLE: fresh-context-reviewer
+ROLE: fresh-context-reviewer (gpt-5.6-sol, max)
 PARENT OBJECTIVE: Accept or reject a change to algorithm.js and its verify.js checks.
 CONTEXT: Judge the User-approved behavior, solver correctness, and regression evidence from disk; ignore implementation rationale initially.
 IN-SCOPE PATHS: algorithm.js, verify.js, current diff, relevant PROJECT-FACTS section

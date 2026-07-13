@@ -1,9 +1,11 @@
 # Status: COMPLETE
-# Purpose: Repository-scoped Codex safety defaults and bounded agent concurrency.
+# Purpose: Repository-scoped Codex model routing, safety defaults, and bounded agent concurrency.
 # Readers: Codex runtime, Commander, and harness reviewers.
 # Source of truth: AGENTS.md and docs/codex-harness/01-HARNESS-LEAK-DIAGNOSIS.md.
 # Hooks are defined only in .codex/hooks.json. No project MCP server is added.
 
+model = 'gpt-5.6-sol'
+model_reasoning_effort = 'max'
 sandbox_mode = 'workspace-write'
 approval_policy = 'on-request'
 

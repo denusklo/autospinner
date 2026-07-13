@@ -39,12 +39,13 @@ Then classify the task and read only the row that applies.
 |---|---|---|
 | `docs/shared-harness/` | Shared policy and deterministic Codex/Claude drift validation | Cross-runtime invariants |
 | `AGENTS.md` | Concise root task router and non-negotiable lifecycle | Permanent repository instruction entry point |
-| `.codex/config.toml` | Sandbox, hook feature, agent depth/thread cap | Trusted-project runtime defaults |
+| `.codex/config.toml` | Commander/planning model route, sandbox, hook feature, agent depth/thread cap | Trusted-project runtime defaults |
 | `.codex/hooks.json` | Hook event wiring only | Canonical project hook representation |
 | `.codex/hooks/` | Boundary/destructive guard, completion gate, validator, tests | Deterministic defense in depth |
-| `.codex/agents/harness-explorer.toml` | Read-only evidence mapping | Tier C explorer role |
-| `.codex/agents/harness-worker.toml` | Harness-only bounded writes | Tier C worker role |
-| `.codex/agents/fresh-context-reviewer.toml` | Read-only independent acceptance | Tier B reviewer role |
+| `.codex/agents/coding-worker.toml` | Bounded application implementation/refactoring on Sol `high` | Coding specialist role |
+| `.codex/agents/harness-explorer.toml` | Read-only evidence mapping on Terra `high` | Exploration/search role |
+| `.codex/agents/harness-worker.toml` | Small harness/mechanical writes on Luna `medium` | Mechanical worker role |
+| `.codex/agents/fresh-context-reviewer.toml` | Read-only independent acceptance on Sol `max` | Reviewer role |
 | `.agents/skills/harness-maintenance/` | Repeated bounded maintenance workflow | Procedure; policy remains in document 05 |
 
 Hooks are defined only in `.codex/hooks.json`, never duplicated inline in project config.

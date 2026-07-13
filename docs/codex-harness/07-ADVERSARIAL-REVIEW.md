@@ -89,3 +89,24 @@ These are limitations, not unresolved review findings:
 `PASS` for independent adversarial review: Critical 0, High 0, Medium 0, Low 0 after corrections.
 
 This verdict accepts the static/deterministic harness implementation. It does not convert the new-session loading, authenticated identity, or external infrastructure limitations into verified behavior.
+
+## 8. 2026-07-13 K3 model-routing migration
+
+The User approved explicit Codex routing: Commander/planning/review on `gpt-5.6-sol` at `max`, coding on `gpt-5.6-sol` at `high`, exploration/search on `gpt-5.6-terra` at `high`, and small mechanical work on `gpt-5.6-luna` at `medium`.
+
+| Pass | Reviewer identity | Result |
+|---|---|---|
+| Initial migration review | `/root/fresh_context_reviewer` | `FAIL`: Critical 0, High 1, Medium 0, Low 0 |
+| Correction re-review | `/root/fresh_context_reviewer` | `PASS`: Critical 0, High 0, Medium 0, Low 0; TC-01 through TC-10 verified |
+
+The initial High found that `01-HARNESS-LEAK-DIAGNOSIS.md` still prescribed three project agents while the router, config, and validator required four including `coding-worker`. The diagnosis now names all four roles and verifies four model/effort/sandbox definitions; `.codex/hooks/validate-harness.js` adds two deterministic assertions against recurrence.
+
+Independent observed results after correction:
+
+- Hook fixtures: `HOOK_TESTS PASS 46/46`.
+- Native harness: `HARNESS_VALIDATION PASS checks=145 warnings=0`.
+- Shared validator self-test: `SHARED_VALIDATOR_SELF_TEST PASS 6/6`.
+- Shared harness: `SHARED_HARNESS_VALIDATION PASS checks=84`.
+- Path-scoped `git diff --check`: exit `0`.
+
+All eleven prepared `.bak.20260713-092146` files, the shared-validator backup, and the corrected-file backups matched their `HEAD` originals during review. The five named pre-existing dirty paths remained outside migration scope. Actual project-role/config/PreToolUse loading remains limited to a new trusted session after the User re-enables PreToolUse.

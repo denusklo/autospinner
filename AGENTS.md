@@ -81,15 +81,16 @@ Report what was recognized and let the User validate ambiguous game semantics be
 
 ## 6. Commander and delegation
 
-The main conversation agent is Commander and owns scope, architecture, acceptance, conflict resolution, and final delivery.
+The main conversation agent is Commander and owns scope, architecture, acceptance, conflict resolution, and final delivery. Commander and planning run on `gpt-5.6-sol` at `max`; role-specific files pin the remaining approved routes below, and no model or reasoning effort may be silently substituted.
 
 Delegate when work requires four or more read-heavy files, output over 200 lines/20 KiB, three or more independent repeated checks, mechanical batching, or final independent acceptance.
 
-| Role | Use when | Access |
-|---|---|---|
-| `harness-explorer` | Repository/config mapping and evidence collection | Read-only |
-| `harness-worker` | Narrow prescribed harness edit after policy/criteria are fixed | Workspace write; harness files only |
-| `fresh-context-reviewer` | Independent final acceptance and adversarial review | Read-only |
+| Role | Use when | Access | Model | Effort |
+|---|---|---|---|---|
+| `coding-worker` | Bounded application implementation or refactoring | Workspace write; named application files only | `gpt-5.6-sol` | `high` |
+| `harness-explorer` | Repository/config mapping and evidence collection | Read-only | `gpt-5.6-terra` | `high` |
+| `harness-worker` | Small prescribed harness or mechanical action after policy/criteria are fixed | Workspace write; harness files only | `gpt-5.6-luna` | `medium` |
+| `fresh-context-reviewer` | Independent final acceptance and adversarial review | Read-only | `gpt-5.6-sol` | `max` |
 
 - `agents.max_depth = 1`; subagents must not delegate.
 - `agents.max_threads = 3`; use fewer unless lanes are independent.

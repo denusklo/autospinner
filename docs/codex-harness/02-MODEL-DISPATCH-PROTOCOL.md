@@ -17,17 +17,23 @@ Use these exact values unless the User approves a policy change:
 - A report contains at most ten summary bullets and no complete log or large code dump.
 - An implementation agent is never its own final acceptance agent.
 - Parallel writes are prohibited by default.
-- `TIER_A_CODEX_TARGET = gpt-5.6-sol` with `model_reasoning_effort = high` or a stronger available setting. Do not silently substitute another model.
+- `TIER_A_CODEX_TARGET = gpt-5.6-sol` with `model_reasoning_effort = max`.
+- `COMMANDER_PLANNING_CODEX_ROUTE=gpt-5.6-sol:max`.
+- `REVIEW_CODEX_ROUTE=gpt-5.6-sol:max`.
+- `CODING_CODEX_ROUTE=gpt-5.6-sol:high`.
+- `EXPLORATION_SEARCH_CODEX_ROUTE=gpt-5.6-terra:high`.
+- `SMALL_MECHANICAL_CODEX_ROUTE=gpt-5.6-luna:medium`.
+- Do not silently substitute another model or reasoning effort for an approved route.
 
 The retry key is `(bounded goal, failing acceptance check, observed symptom)`. A regression caused by the same patch chain does not reset the counter merely because its wording differs.
 
 ## 2. Capability tiers
 
-Tier names describe durable responsibilities. The Tier A Codex target below is binding until a User-approved model migration changes it; Tier B/C examples remain capability-based and must be checked against current availability.
+Tier names describe durable responsibilities. The explicit role routes below are binding until another User-approved model migration changes them.
 
 ### Tier A — Architect
 
-Required Codex escalation target: `gpt-5.6-sol` at `high` or a stronger available reasoning setting. If that exact model is unavailable, stop before substituting another model, verify the installed model surface, and invoke the model-migration circuit breaker in section 8.
+Required Commander, planning, architecture, and escalation target: `gpt-5.6-sol` at `max`. If that exact route is unavailable, stop before substituting another route, verify the installed model surface, and invoke the model-migration circuit breaker in section 8.
 
 Owns:
 
@@ -47,7 +53,7 @@ Must not:
 
 ### Tier B — Specialist
 
-Typical configuration: a strong reasoning model at Medium or High with narrow instructions.
+Required application-coding route: `coding-worker` on `gpt-5.6-sol` at `high`. Required independent-review route: `fresh-context-reviewer` on `gpt-5.6-sol` at `max`.
 
 Owns bounded work such as:
 
@@ -61,7 +67,7 @@ Tier B may propose a design inside its assigned boundary. The Commander accepts 
 
 ### Tier C — Worker or Explorer
 
-Typical configuration: a cost-efficient model, such as GPT-5.6 Terra when available, or an equivalent at Low or Medium reasoning. Terra availability is not assumed by this repository.
+Required exploration/search route: `harness-explorer` on `gpt-5.6-terra` at `high`. Required small-mechanical route: `harness-worker` on `gpt-5.6-luna` at `medium`. Neither role may silently inherit or substitute a different route.
 
 Owns bounded work such as:
 
@@ -230,16 +236,18 @@ The Commander dispatches `.codex/agents/fresh-context-reviewer.toml` after imple
 
 ## 8. Model-name migration
 
-Custom agent files omit concrete model names so they inherit an available parent model. Reasoning effort and sandbox role remain explicit.
+The project root pins Commander/planning defaults, and each custom agent file pins its approved role-specific model, reasoning effort, and sandbox role. New custom roles inherit only when a separate User-approved migration explicitly says they may.
 
 When model availability changes:
 
 1. Verify available model identifiers from the installed Codex surface or official current documentation.
 2. Map each candidate to Tier A, B, or C capability; do not migrate by price or name alone.
-3. Change one agent definition at a time only if a concrete pin is necessary.
+3. Change one root or agent route at a time and keep documentation plus deterministic assertions synchronized.
 4. Run TOML validation and one representative dispatch.
 5. Preserve the old result and compare scope compliance, error rate, evidence quality, latency, and cost.
 6. Require User approval if dispatch authority, safety, review independence, or recursive depth would change.
+
+The approved 2026-07-13 mapping is Commander/planning/review on Sol `max`, coding on Sol `high`, exploration/search on Terra `high`, and small mechanical work on Luna `medium`. Roll back by restoring the untouched pre-migration backups and re-running native/shared validation; never roll back by silently selecting a different route.
 
 If `TIER_A_CODEX_TARGET` is unavailable when an escalation is required, use CB-08: present the verified available candidates and migration trade-offs, ask one narrow User question, and do not silently treat an equivalent model as the approved Tier A destination.
 

@@ -5,7 +5,8 @@
 
 name = 'harness-explorer'
 description = 'Read-only Codex harness explorer for concise repository, instruction, path, and configuration evidence.'
-model_reasoning_effort = 'medium'
+model = 'gpt-5.6-terra'
+model_reasoning_effort = 'high'
 sandbox_mode = 'read-only'
 developer_instructions = '''
 Operate only as a read-only Tier C explorer for C:\Projects\autospinner.

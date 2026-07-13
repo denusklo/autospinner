@@ -28,7 +28,7 @@ Verified baseline on 2026-07-10:
 1. Native Windows PowerShell is the primary operating environment. Git Bash and WSL path forms are normalized by guards, but are not assumed to be the normal launch environment.
 2. The dirty legacy `.claude` files are preserved unchanged. They remain evidence and application-specific guidance; the new Codex layer supersedes only legacy Codex-incompatible orchestration rules.
 3. No networked MCP server is added. Global MCP/plugin changes are recommendations only.
-4. No concrete worker model is hard-coded. Only `gpt-5.6-sol` was evidenced locally; Terra availability was not verified.
+4. The User-approved 2026-07-13 routing pins Commander/planning/review to `gpt-5.6-sol`, coding to `gpt-5.6-sol`, exploration/search to `gpt-5.6-terra`, and small mechanical work to `gpt-5.6-luna`; installed Codex `0.144.1` exposed all three identifiers and the requested reasoning levels before migration.
 5. Direct hook-script tests can verify guard logic. Actual Codex hook discovery, hash trust, and lifecycle execution require a fresh session and are recorded as only partially verifiable in this session.
 
 ## 2. Ranked diagnosis
@@ -89,7 +89,7 @@ Create a concise root `AGENTS.md` as the permanent Codex routing hub. Define cap
 ### Physical blocking solution
 
 - Deploy `.codex/config.toml` with workspace-write sandboxing, network disabled by default, `agents.max_depth = 1`, and a conservative thread cap.
-- Deploy narrow project agents: read-only explorer, bounded harness worker, and read-only fresh-context reviewer.
+- Deploy four narrow project agents: application coding worker, read-only harness explorer, small-mechanical harness worker, and read-only fresh-context reviewer.
 - Deploy a repository skill for repeatable harness maintenance.
 - Deploy a consistency validator that fails when the router, agent files, skill, hooks, or links are missing or malformed.
 
@@ -112,7 +112,7 @@ Project config can be bypassed by higher-precedence runtime/admin settings. Cust
 
 1. Parse all TOML/JSON files.
 2. Confirm root `AGENTS.md` is below 32 KiB and 300 lines.
-3. Confirm three agent files contain required fields and intended sandbox modes.
+3. Confirm four agent files contain the approved model/effort routes, required fields, and intended sandbox modes.
 4. Confirm `agents.max_depth = 1` and the documented thread cap.
 5. In a new trusted session, report the loaded instruction/config/hook sources and inspect `/hooks` or the equivalent UI.
 

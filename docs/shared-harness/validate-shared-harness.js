@@ -132,7 +132,12 @@ function validate() {
   const codexDispatch = files.get('docs/codex-harness/02-MODEL-DISPATCH-PROTOCOL.md') || '';
   check(/RETRY_BUDGET\s*=\s*2 materially different repair attempts per capability tier/.test(codexDispatch), 'Codex retry budget drift');
   check(/regression caused by the same patch chain does not reset/i.test(codexDispatch), 'Codex retry reset drift');
-  check(/TIER_A_CODEX_TARGET\s*=\s*gpt-5\.6-sol/.test(codexDispatch), 'Codex Tier A target drift');
+  check(/TIER_A_CODEX_TARGET\s*=\s*gpt-5\.6-sol[^\r\n]*model_reasoning_effort\s*=\s*max/.test(codexDispatch), 'Codex Tier A route drift');
+  check(/COMMANDER_PLANNING_CODEX_ROUTE=gpt-5\.6-sol:max/.test(codexDispatch), 'Codex Commander/planning route drift');
+  check(/REVIEW_CODEX_ROUTE=gpt-5\.6-sol:max/.test(codexDispatch), 'Codex review route drift');
+  check(/CODING_CODEX_ROUTE=gpt-5\.6-sol:high/.test(codexDispatch), 'Codex coding route drift');
+  check(/EXPLORATION_SEARCH_CODEX_ROUTE=gpt-5\.6-terra:high/.test(codexDispatch), 'Codex exploration/search route drift');
+  check(/SMALL_MECHANICAL_CODEX_ROUTE=gpt-5\.6-luna:medium/.test(codexDispatch), 'Codex small-mechanical route drift');
 
   const claudeDispatch = files.get('.claude/harness/01-MODEL-DISPATCH.md') || '';
   check(/RETRY_BUDGET\s*=\s*2 materially different repair attempts per capability tier/.test(claudeDispatch), 'Claude retry budget mirror missing');

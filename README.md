@@ -7,6 +7,8 @@ AutoDora / DoraHeart V2 spec), and executes the drag with synthesized mouse even
 
 Vanilla JS. No build step, no dependencies.
 
+**Case study:** how it reads, solves and drags, with recorded scenarios → <https://www.denusklo.com/projects/autospinner/>
+
 ## Install
 
 1. Open Chrome → `chrome://extensions/`
